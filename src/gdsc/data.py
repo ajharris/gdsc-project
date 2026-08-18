@@ -7,6 +7,11 @@ from urllib.request import urlopen
 
 
 DOWNLOADS_URL = "https://gdsc-combinations.depmap.sanger.ac.uk/downloads"
+TISSUE_DOWNLOADS = {
+    "breast": ("/downloads/breast/anchor_combo",),
+    "colon": ("/downloads/colon/anchor_combo",),
+    "pancreas": ("/downloads/pancreas/anchor_combo",),
+}
 
 
 class _DownloadLinkParser(HTMLParser):
@@ -52,6 +57,11 @@ def download_gdsc(tissue_of_origin="Lung", data_dir="data/raw"):
         and href is not None
         and href.startswith("/downloads/")
     ]
+    if not matches:
+        matches = [
+            (tissue_of_origin, urljoin(DOWNLOADS_URL, href))
+            for href in TISSUE_DOWNLOADS.get(requested_tissue, ())
+        ]
     if not matches:
         raise ValueError(
             f"No GDSC² download datasets found for tissue {tissue_of_origin!r}"
