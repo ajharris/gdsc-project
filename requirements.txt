@@ -2,7 +2,6 @@ asttokens==3.0.2
 comm==0.2.3
 debugpy==1.8.21
 executing==2.2.1
--e git+https://github.com/ajharris/gdsc-project.git@8e64318b26d6fa5eb6b34c5d23db0854c6f1be96#egg=gdsc_project
 iniconfig==2.3.0
 ipykernel==7.3.0
 ipython==9.16.1
