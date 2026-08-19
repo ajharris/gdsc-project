@@ -30,9 +30,9 @@ that matching decision is intentionally deferred to the research-design stage.
 ```python
 from gdsc.data import download_gdsc, filter_by_tissue, load_gdsc, validate_gdsc
 
-download_gdsc("data/raw")
-validate_gdsc("data/raw")
-gdsc = load_gdsc("data/raw")
+download_gdsc("../data/raw")
+validate_gdsc("../data/raw")
+gdsc = load_gdsc("../data/raw")
 pancreas = filter_by_tissue(gdsc, "pancreas")
 ```
 
@@ -41,4 +41,21 @@ pancreas = filter_by_tissue(gdsc, "pancreas")
 `COSMIC_ID`. Tissue is metadata, not a download parameter. `validate_gdsc`
 performs offline structural checks. `prepare_gdsc` is a convenience wrapper
 for download, validation, and loading.
-# gdsc-project
+
+
+## Preprocessing
+
+The checked-in raw data contain response records and cell-line assay
+availability flags, but no genomic feature matrix. A genomic source and
+modality (WES, CNA, expression, or methylation) must be selected and supplied
+before an analytical dataset can be created; the preprocessing module does not
+silently substitute one.
+
+`X` contains numeric genomic features only. `y` is the requested response
+metric and `metadata` separately preserves identifiers, tissue, cancer type,
+and drug fields. The returned `info` dictionary records join counts, feature
+filtering, and thresholds. By default features with more than 20% missingness
+and constant features are removed; remaining missing values are preserved.
+This avoids a global imputation fit. If later modelling requires imputation or
+scaling, call `build_training_transformer(...)`, fit it on training features
+only, and use that fitted transformer to transform held-out data.
