@@ -96,5 +96,46 @@ class LoadGdscTests(unittest.TestCase):
                 data.load_gdsc(directory, tissue_of_origin="Lung")
 
 
+class ValidateGdscTests(unittest.TestCase):
+    def _write_dataset(self, directory, rows):
+        columns = sorted(data.REQUIRED_COLUMNS)
+        content = ",".join(columns) + "\n"
+        for row in rows:
+            content += ",".join(row.get(column, "") for column in columns) + "\n"
+        with gzip.open(Path(directory) / "data.csv.gz", "wt") as output_file:
+            output_file.write(content)
+
+    def test_returns_true_for_valid_dataset(self):
+        with TemporaryDirectory() as directory:
+            self._write_dataset(directory, [{"Tissue": "Pancreas"}])
+
+            self.assertTrue(data.validate_gdsc(directory, "pancreas"))
+
+    def test_raises_when_required_columns_are_missing(self):
+        with TemporaryDirectory() as directory:
+            with gzip.open(Path(directory) / "data.csv.gz", "wt") as output_file:
+                output_file.write("Tissue\nPancreas\n")
+
+            with self.assertRaisesRegex(ValueError, "missing required columns"):
+                data.validate_gdsc(directory, required_columns=data.REQUIRED_COLUMNS)
+
+    def test_allows_additional_or_changed_columns_by_default(self):
+        with TemporaryDirectory() as directory:
+            with gzip.open(Path(directory) / "data.csv.gz", "wt") as output_file:
+                output_file.write("Tissue,New Measurement\nPancreas,1.5\n")
+
+            self.assertTrue(data.validate_gdsc(directory, tissue_of_origin="pancreas"))
+
+    def test_raises_when_data_contains_another_tissue(self):
+        with TemporaryDirectory() as directory:
+            self._write_dataset(
+                directory,
+                [{"Tissue": "Pancreas"}, {"Tissue": "Breast"}],
+            )
+
+            with self.assertRaisesRegex(ValueError, "outside tissue"):
+                data.validate_gdsc(directory, "pancreas")
+
+
 if __name__ == "__main__":
     unittest.main()

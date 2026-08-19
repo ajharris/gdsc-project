@@ -14,6 +14,28 @@ TISSUE_DOWNLOADS = {
     "colon": ("/downloads/colon/anchor_combo",),
     "pancreas": ("/downloads/pancreas/anchor_combo",),
 }
+REQUIRED_COLUMNS = {
+    "Cell Line name",
+    "SDIM",
+    "Tissue",
+    "Cancer Type",
+    "Anchor Name",
+    "Anchor Target",
+    "Anchor Pathway",
+    "Anchor Conc",
+    "Library Name",
+    "library Target",
+    "Library Pathway",
+    "Maxc",
+    "Library IC50",
+    "Combo IC50",
+    "Library Emax",
+    "Bliss Emax",
+    "Combo Emax",
+    "Delta Xmid",
+    "Delta Emax",
+    "Synergy?",
+}
 
 
 class _DownloadLinkParser(HTMLParser):
@@ -96,6 +118,7 @@ def load_gdsc(data_dir="data/raw", tissue_of_origin=None):
         (pd.read_csv(input_file, compression="gzip") for input_file in input_files),
         ignore_index=True,
     )
+    data.columns = data.columns.str.strip()
     if tissue_of_origin is not None:
         if "Tissue" not in data.columns:
             raise ValueError("GDSC data does not contain a 'Tissue' column")
@@ -107,5 +130,26 @@ def load_gdsc(data_dir="data/raw", tissue_of_origin=None):
     return data
 
 
-def validate_gdsc(*args, **kwargs):
-    """Check that the expected files and columns are present."""
+def validate_gdsc(data_dir="data/raw", tissue_of_origin=None, required_columns=None):
+    """Validate local GDSC² files and return ``True`` when they are valid.
+
+    By default, validation is tolerant of schema changes. When filtering by
+    ``tissue_of_origin``, the ``Tissue`` column is required. Callers can pass
+    ``required_columns`` for analysis-specific schema validation.
+    """
+    data = load_gdsc(data_dir)
+    required_columns = set(required_columns or ())
+    if tissue_of_origin is not None:
+        required_columns.add("Tissue")
+    missing_columns = required_columns.difference(data.columns)
+    if missing_columns:
+        missing = ", ".join(sorted(missing_columns))
+        raise ValueError(f"GDSC data is missing required columns: {missing}")
+
+    if tissue_of_origin is not None:
+        tissues = data["Tissue"].dropna().astype(str).str.casefold()
+        if not (tissues == tissue_of_origin.casefold()).all():
+            raise ValueError(
+                f"GDSC data contains rows outside tissue {tissue_of_origin!r}"
+            )
+    return True
