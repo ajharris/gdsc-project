@@ -7,7 +7,10 @@ name = "gdsc-project"
 version = "0.1.0"
 description = "Tools for downloading and analyzing GDSC data"
 requires-python = ">=3.12"
-dependencies = ["pandas>=2.0"]
+dependencies = ["openpyxl>=3.1", "pandas>=2.0"]
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
