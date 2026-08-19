@@ -2,7 +2,6 @@ asttokens==3.0.2
 comm==0.2.3
 debugpy==1.8.21
 executing==2.2.1
--e git+https://github.com/ajharris/gdsc-project.git@fc47c16e7f8036cc37093bd59a3c1788ce8b65e0#egg=gdsc_project
 ipykernel==7.3.0
 ipython==9.16.1
 ipython_pygments_lexers==1.1.1
@@ -28,3 +27,4 @@ tornado==6.5.8
 traitlets==5.16.1
 typing_extensions==4.16.0
 wcwidth==0.8.2
+pandas>=2.0

@@ -5,6 +5,8 @@ from pathlib import Path
 from urllib.parse import urljoin, urlparse
 from urllib.request import urlopen
 
+import pandas as pd
+
 
 DOWNLOADS_URL = "https://gdsc-combinations.depmap.sanger.ac.uk/downloads"
 TISSUE_DOWNLOADS = {
@@ -80,8 +82,29 @@ def download_gdsc(tissue_of_origin="Lung", data_dir="data/raw"):
     return downloaded_paths
 
 
-def load_gdsc(*args, **kwargs):
-    """Load the locally stored GDSC data."""
+def load_gdsc(data_dir="data/raw", tissue_of_origin=None):
+    """Load downloaded GDSC² datasets into one DataFrame.
+
+    All compressed CSV files in ``data_dir`` are loaded in sorted filename
+    order. If ``tissue_of_origin`` is provided, rows are filtered by ``Tissue``.
+    """
+    input_files = sorted(Path(data_dir).glob("*.csv.gz"))
+    if not input_files:
+        raise FileNotFoundError(f"No GDSC CSV files found in {data_dir!r}")
+
+    data = pd.concat(
+        (pd.read_csv(input_file, compression="gzip") for input_file in input_files),
+        ignore_index=True,
+    )
+    if tissue_of_origin is not None:
+        if "Tissue" not in data.columns:
+            raise ValueError("GDSC data does not contain a 'Tissue' column")
+        data = data[data["Tissue"].str.casefold() == tissue_of_origin.casefold()]
+        if data.empty:
+            raise ValueError(
+                f"No GDSC rows found for tissue {tissue_of_origin!r}"
+            )
+    return data
 
 
 def validate_gdsc(*args, **kwargs):
