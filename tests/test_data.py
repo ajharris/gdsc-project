@@ -142,5 +142,28 @@ class ValidateGdscTests(unittest.TestCase):
                 data.validate_gdsc(directory, "pancreas")
 
 
+class PrepareGdscTests(unittest.TestCase):
+    @patch.object(data, "load_gdsc", return_value="loaded data")
+    @patch.object(data, "validate_gdsc")
+    @patch.object(data, "download_gdsc")
+    def test_downloads_validates_and_loads(
+        self, mock_download, mock_validate, mock_load
+    ):
+        result = data.prepare_gdsc(
+            "pancreas",
+            data_dir="tmp/raw",
+            required_columns={"Tissue"},
+        )
+
+        self.assertEqual(result, "loaded data")
+        mock_download.assert_called_once_with("pancreas", data_dir="tmp/raw")
+        mock_validate.assert_called_once_with(
+            "tmp/raw",
+            tissue_of_origin="pancreas",
+            required_columns={"Tissue"},
+        )
+        mock_load.assert_called_once_with("tmp/raw", tissue_of_origin="pancreas")
+
+
 if __name__ == "__main__":
     unittest.main()

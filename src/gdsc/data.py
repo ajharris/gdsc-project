@@ -153,3 +153,14 @@ def validate_gdsc(data_dir="data/raw", tissue_of_origin=None, required_columns=N
                 f"GDSC data contains rows outside tissue {tissue_of_origin!r}"
             )
     return True
+
+
+def prepare_gdsc(tissue_of_origin, data_dir="data/raw", required_columns=None):
+    """Download, validate, and load GDSC² data for one tissue."""
+    download_gdsc(tissue_of_origin, data_dir=data_dir)
+    validate_gdsc(
+        data_dir,
+        tissue_of_origin=tissue_of_origin,
+        required_columns=required_columns,
+    )
+    return load_gdsc(data_dir, tissue_of_origin=tissue_of_origin)
