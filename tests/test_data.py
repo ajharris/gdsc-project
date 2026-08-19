@@ -111,6 +111,11 @@ class ValidateGdscTests(unittest.TestCase):
 
             self.assertTrue(data.validate_gdsc(directory, "pancreas"))
 
+    def test_raises_when_validation_directory_has_no_datasets(self):
+        with TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(FileNotFoundError, "No GDSC CSV files"):
+                data.validate_gdsc(directory, tissue_of_origin="pancreas")
+
     def test_raises_when_required_columns_are_missing(self):
         with TemporaryDirectory() as directory:
             with gzip.open(Path(directory) / "data.csv.gz", "wt") as output_file:
