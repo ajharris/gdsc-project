@@ -79,6 +79,22 @@ class LoadGdscTests(unittest.TestCase):
             with self.assertRaisesRegex(FileNotFoundError, "No GDSC CSV files"):
                 data.load_gdsc(directory)
 
+    def test_raises_when_tissue_column_is_missing(self):
+        with TemporaryDirectory() as directory:
+            with gzip.open(Path(directory) / "data.csv.gz", "wt") as output_file:
+                output_file.write("Score\n1\n")
+
+            with self.assertRaisesRegex(ValueError, "Tissue"):
+                data.load_gdsc(directory, tissue_of_origin="pancreas")
+
+    def test_raises_when_requested_tissue_has_no_rows(self):
+        with TemporaryDirectory() as directory:
+            with gzip.open(Path(directory) / "data.csv.gz", "wt") as output_file:
+                output_file.write("Tissue,Score\nBreast,1\n")
+
+            with self.assertRaisesRegex(ValueError, "Lung"):
+                data.load_gdsc(directory, tissue_of_origin="Lung")
+
 
 if __name__ == "__main__":
     unittest.main()
