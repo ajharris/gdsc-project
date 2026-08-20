@@ -59,3 +59,12 @@ and constant features are removed; remaining missing values are preserved.
 This avoids a global imputation fit. If later modelling requires imputation or
 scaling, call `build_training_transformer(...)`, fit it on training features
 only, and use that fitted transformer to transform held-out data.
+
+## COSMIC expression feature store
+
+COSMIC v104 Cell Lines Project expression is cached separately as long-format
+`data/processed/cosmic_expression.parquet`. It is never merged onto the full
+GDSC response table. Configure `COSMIC_AUTHORIZATION` locally in `.env` (never
+commit it), then build the cache once with `build_expression_cache("data")`.
+Use `load_expression_features("data", cosmic_sample_ids=[...], genes=[...])`
+to retrieve only the features required by a later preprocessing step.

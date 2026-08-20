@@ -1,350 +1,166 @@
-"""Acquire, process, cache, and load COSMIC cell-line gene expression data."""
+"""Memory-safe COSMIC Cell Lines expression feature store.
 
+Raw COSMIC files remain in ``data/raw``. A de-duplicated long-format Parquet
+cache is built in ``data/processed`` and queried by sample and/or gene. This
+module never attaches all expression features to all GDSC response rows.
+"""
 from __future__ import annotations
 
 import os
+import sqlite3
 import tarfile
 from pathlib import Path
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import pandas as pd
+from dotenv import load_dotenv
+
+load_dotenv(".env.example")
+load_dotenv()
+COSMIC_EXPRESSION_ARCHIVE = os.environ["COSMIC_EXPRESSION_ARCHIVE"]
+COSMIC_EXPRESSION_FILE = os.environ["COSMIC_EXPRESSION_FILE"]
+COSMIC_SAMPLE_FILE = os.environ["COSMIC_SAMPLE_FILE"]
+COSMIC_EXPRESSION_PARQUET = os.environ["COSMIC_EXPRESSION_PARQUET"]
+COSMIC_EXPRESSION_URL = os.environ["COSMIC_EXPRESSION_URL"]
+EXPRESSION_COLUMNS = ["COSMIC_SAMPLE_ID", "SAMPLE_NAME", "GENE_SYMBOL", "Z_SCORE"]
+EXPRESSION_REQUIRED_COLUMNS = set(EXPRESSION_COLUMNS) | {"COSMIC_GENE_ID", "REGULATION", "COSMIC_STUDY_ID"}
 
 
-COSMIC_EXPRESSION_ARCHIVE = (
-    "CellLinesProject_CompleteGeneExpression_Tsv_v104_GRCh38.tar"
-)
-COSMIC_EXPRESSION_FILE = (
-    "CellLinesProject_CompleteGeneExpression_v104_GRCh38.tsv.gz"
-)
-COSMIC_EXPRESSION_PARQUET = "cosmic_expression.parquet"
-
-EXPRESSION_REQUIRED_COLUMNS = {
-    "COSMIC_SAMPLE_ID",
-    "SAMPLE_NAME",
-    "COSMIC_GENE_ID",
-    "GENE_SYMBOL",
-    "REGULATION",
-    "Z_SCORE",
-    "COSMIC_STUDY_ID",
-}
+def _cosmic_request() -> Request:
+    """Build an authenticated request without logging credentials."""
+    load_dotenv()
+    link = os.environ.get("COSMIC_LINK", COSMIC_EXPRESSION_URL)
+    authorization = os.environ.get("COSMIC_AUTHORIZATION")
+    if link == COSMIC_EXPRESSION_URL and not authorization:
+        raise RuntimeError("COSMIC_AUTHORIZATION is not set; add it to local .env")
+    return Request(link, headers={"Authorization": f"Basic {authorization}"} if authorization else {})
 
 
-def _cosmic_link() -> str:
-    """Return the current user-specific COSMIC download URL."""
-    link = os.environ.get("COSMIC_LINK")
-
-    if not link:
-        raise RuntimeError(
-            "COSMIC_LINK is not set. Add the current signed COSMIC "
-            "expression download URL to the environment."
-        )
-
-    return link
-
-
-def _download_file(url: str, output_path: Path) -> None:
-    """Download a URL to a local file."""
-    with urlopen(url) as response, output_path.open("wb") as output_file:
+def _download_file(request: Request | str, destination: Path) -> None:
+    with urlopen(request) as response, destination.open("wb") as output:
         while chunk := response.read(1024 * 1024):
-            output_file.write(chunk)
+            output.write(chunk)
 
 
-def _extract_expression_archive(
-    archive_path: Path,
-    output_dir: Path,
-) -> Path:
-    """Extract the COSMIC expression TSV from the downloaded archive."""
-    expression_path = output_dir / COSMIC_EXPRESSION_FILE
-
-    if expression_path.exists():
-        return expression_path
-
-    with tarfile.open(archive_path, mode="r") as archive:
-        members = [
-            member
-            for member in archive.getmembers()
-            if Path(member.name).name == COSMIC_EXPRESSION_FILE
-        ]
-
-        if len(members) != 1:
-            raise ValueError(
-                "Expected exactly one COSMIC expression file in archive; "
-                f"found {len(members)}"
-            )
-
-        member = members[0]
-
+def _extract_member(archive_path: Path, output_dir: Path, filename: str) -> Path:
+    destination = output_dir / filename
+    if destination.exists():
+        return destination
+    with tarfile.open(archive_path) as archive:
+        matches = [member for member in archive.getmembers() if Path(member.name).name == filename]
+        if len(matches) != 1:
+            raise ValueError(f"Expected exactly one {filename} in archive; found {len(matches)}")
+        member = matches[0]
         if not member.isfile():
-            raise ValueError(
-                f"COSMIC expression archive member is not a regular file: "
-                f"{member.name}"
-            )
-
-        archive.extract(member, path=output_dir)
-
-    extracted_path = output_dir / member.name
-
-    if extracted_path != expression_path:
-        expression_path.parent.mkdir(parents=True, exist_ok=True)
-        extracted_path.replace(expression_path)
-
-    return expression_path
+            raise ValueError(f"COSMIC archive member is not a regular file: {member.name}")
+        source = archive.extractfile(member)
+        if source is None:
+            raise ValueError(f"Cannot read COSMIC archive member: {member.name}")
+        with source, destination.open("wb") as output:
+            while chunk := source.read(1024 * 1024):
+                output.write(chunk)
+    return destination
 
 
-def download_cosmic_expression(
-    data_dir="../data/raw",
-) -> dict[str, Path]:
-    """Download and extract the COSMIC v104 expression dataset.
-
-    The COSMIC download URL is supplied through COSMIC_LINK because it is
-    user-specific and time-limited.
-    """
-    output_dir = Path(data_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    archive_path = output_dir / COSMIC_EXPRESSION_ARCHIVE
-    expression_path = output_dir / COSMIC_EXPRESSION_FILE
-
-    if not archive_path.exists():
-        _download_file(_cosmic_link(), archive_path)
-
-    if not expression_path.exists():
-        _extract_expression_archive(
-            archive_path,
-            output_dir,
-        )
-
-    return {
-        "archive": archive_path,
-        "expression": expression_path,
-    }
+def download_cosmic_expression(data_dir="data/raw") -> dict[str, Path]:
+    """Download/reuse COSMIC v104 expression archive and extract its TSV."""
+    raw_dir = Path(data_dir)
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    archive = raw_dir / COSMIC_EXPRESSION_ARCHIVE
+    if not archive.exists():
+        _download_file(_cosmic_request(), archive)
+    return {"archive": archive, "expression": _extract_member(archive, raw_dir, COSMIC_EXPRESSION_FILE)}
 
 
-def _load_expression_tsv(
-    expression_path: Path,
-) -> pd.DataFrame:
-    """Load the raw COSMIC expression TSV."""
-    expression = pd.read_csv(
-        expression_path,
-        sep="\t",
-        compression="gzip",
-    )
-
-    expression.columns = expression.columns.str.strip()
-
-    missing = EXPRESSION_REQUIRED_COLUMNS - set(expression.columns)
-
+def _normalise_expression(frame: pd.DataFrame) -> pd.DataFrame:
+    missing = EXPRESSION_REQUIRED_COLUMNS - set(frame.columns)
     if missing:
-        raise ValueError(
-            "COSMIC expression data is missing columns: "
-            f"{sorted(missing)}"
-        )
+        raise ValueError(f"COSMIC expression data is missing columns: {sorted(missing)}")
+    frame = frame.loc[:, EXPRESSION_COLUMNS].copy()
+    frame["SAMPLE_NAME"] = frame["SAMPLE_NAME"].astype("string").str.strip()
+    frame["GENE_SYMBOL"] = frame["GENE_SYMBOL"].astype("string").str.strip()
+    frame["Z_SCORE"] = pd.to_numeric(frame["Z_SCORE"], errors="coerce")
+    return frame.dropna(subset=EXPRESSION_COLUMNS)
 
-    return expression
 
+def build_expression_cache(data_dir="data", *, rebuild=False, chunksize=250_000) -> Path:
+    """Create/reuse the long Parquet cache with arithmetic-mean duplicates.
 
-def _prepare_expression(
-    expression_path: Path,
-) -> pd.DataFrame:
-    """Convert COSMIC expression from long to cell-line-wide format.
-
-    COSMIC provides one record per sample/gene/study. The analytical
-    expression matrix contains one row per COSMIC sample and one column
-    per gene, with Z_SCORE as the expression value.
-
-    COSU619 contains a small number of duplicated sample/gene records.
-    These arise from duplicate observations within the source study.
-    When duplicate observations have different Z-scores, their mean is
-    used so that each sample/gene pair has a single reproducible value.
+    SQLite maintains per sample/gene sums and counts across input chunks, which
+    preserves the documented duplicate-resolution policy without loading the
+    ~17.5M-row TSV into memory.
     """
-    expression = _load_expression_tsv(expression_path)
-
-    expression = expression[
-        [
-            "COSMIC_SAMPLE_ID",
-            "SAMPLE_NAME",
-            "GENE_SYMBOL",
-            "Z_SCORE",
-            "COSMIC_STUDY_ID",
-        ]
-    ].copy()
-
-    expression["SAMPLE_NAME"] = (
-        expression["SAMPLE_NAME"]
-        .astype("string")
-        .str.strip()
-    )
-
-    expression["GENE_SYMBOL"] = (
-        expression["GENE_SYMBOL"]
-        .astype("string")
-        .str.strip()
-    )
-
-    expression["Z_SCORE"] = pd.to_numeric(
-        expression["Z_SCORE"],
-        errors="coerce",
-    )
-
-    # Keep only the expression value needed for the ML feature matrix.
-    # COSMIC_STUDY_ID is retained during duplicate resolution but is not
-    # part of the final feature matrix.
-    expression = (
-        expression.groupby(
-            [
-                "COSMIC_SAMPLE_ID",
-                "SAMPLE_NAME",
-                "GENE_SYMBOL",
-            ],
-            as_index=False,
-        )["Z_SCORE"]
-        .mean()
-    )
-
-    expression_wide = expression.pivot(
-        index=[
-            "COSMIC_SAMPLE_ID",
-            "SAMPLE_NAME",
-        ],
-        columns="GENE_SYMBOL",
-        values="Z_SCORE",
-    ).reset_index()
-
-    expression_wide.columns.name = None
-
-    return expression_wide
+    root = Path(data_dir)
+    raw, processed = root / "raw", root / "processed"
+    cache = processed / COSMIC_EXPRESSION_PARQUET
+    if cache.exists() and not rebuild:
+        return cache
+    source = raw / COSMIC_EXPRESSION_FILE
+    if not source.exists():
+        download_cosmic_expression(raw)
+    processed.mkdir(parents=True, exist_ok=True)
+    database = processed / ".cosmic_build.sqlite"
+    database.unlink(missing_ok=True)
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("CREATE TABLE expression (sample_id TEXT, sample_name TEXT, gene TEXT, total REAL, count INTEGER, PRIMARY KEY(sample_id, gene))")
+        for chunk in pd.read_csv(source, sep="\t", compression="gzip", chunksize=chunksize):
+            values = _normalise_expression(chunk)
+            grouped = values.groupby(["COSMIC_SAMPLE_ID", "SAMPLE_NAME", "GENE_SYMBOL"], as_index=False)["Z_SCORE"].agg(["sum", "count"]).reset_index()
+            connection.executemany("INSERT INTO expression VALUES (?, ?, ?, ?, ?) ON CONFLICT(sample_id,gene) DO UPDATE SET total=total+excluded.total,count=count+excluded.count", grouped[["COSMIC_SAMPLE_ID", "SAMPLE_NAME", "GENE_SYMBOL", "sum", "count"]].itertuples(index=False, name=None))
+            connection.commit()
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        writer = None
+        try:
+            for chunk in pd.read_sql_query("SELECT sample_id COSMIC_SAMPLE_ID, sample_name SAMPLE_NAME, gene GENE_SYMBOL, total/count Z_SCORE FROM expression", connection, chunksize=chunksize):
+                table = pa.Table.from_pandas(chunk, preserve_index=False)
+                writer = writer or pq.ParquetWriter(cache, table.schema, compression="zstd")
+                writer.write_table(table)
+        finally:
+            if writer:
+                writer.close()
+    finally:
+        connection.close()
+        database.unlink(missing_ok=True)
+    return cache
 
 
-def load_or_build_expression(
-    data_dir="../data/raw",
-) -> pd.DataFrame:
-    """Load cached COSMIC expression or build the Parquet cache.
-
-    If the Parquet cache exists, the expensive raw TSV processing step is
-    skipped.
-    """
-    data_path = Path(data_dir)
-    parquet_path = data_path / COSMIC_EXPRESSION_PARQUET
-
-    if parquet_path.exists():
-        return pd.read_parquet(parquet_path)
-
-    expression_path = data_path / COSMIC_EXPRESSION_FILE
-
-    if not expression_path.exists():
-        download_cosmic_expression(data_path)
-
-    expression = _prepare_expression(expression_path)
-
-    expression.to_parquet(
-        parquet_path,
-        index=False,
-    )
-
-    return expression
+def load_expression_features(data_dir="data", *, cosmic_sample_ids=None, genes=None) -> pd.DataFrame:
+    """Read selected long-format features with Parquet predicate pushdown."""
+    if cosmic_sample_ids is None and genes is None:
+        raise ValueError("Specify cosmic_sample_ids and/or genes; unrestricted load is unsafe")
+    cache = build_expression_cache(data_dir)
+    import pyarrow.dataset as ds
+    predicates = []
+    for field, values in (("COSMIC_SAMPLE_ID", cosmic_sample_ids), ("GENE_SYMBOL", genes)):
+        if values is not None:
+            values = list(dict.fromkeys(values))
+            if not values:
+                return pd.DataFrame(columns=EXPRESSION_COLUMNS)
+            predicates.append(ds.field(field).isin(values))
+    predicate = predicates[0]
+    for item in predicates[1:]:
+        predicate &= item
+    return ds.dataset(cache, format="parquet").to_table(filter=predicate).to_pandas()
 
 
-def map_cosmic_samples(
-    metadata: pd.DataFrame,
-    expression: pd.DataFrame,
-) -> pd.DataFrame:
-    """Map GDSC cell-line metadata to COSMIC sample identifiers.
-
-    The mapping uses the shared Sample Name/SAMPLE_NAME field. The
-    resulting table contains the GDSC COSMIC_ID and corresponding
-    COSMIC_SAMPLE_ID.
-    """
-    required_metadata = {
-        "COSMIC_ID",
-        "Sample Name",
-    }
-
-    missing = required_metadata - set(metadata.columns)
-
+def build_sample_mapping(gdsc_metadata: pd.DataFrame, data_dir="data") -> tuple[pd.DataFrame, dict[str, object]]:
+    """Map GDSC Sample Name to COSMIC_SAMPLE_ID, retaining unmatched rows."""
+    required = {"COSMIC_ID", "Sample Name"}
+    missing = required - set(gdsc_metadata.columns)
     if missing:
-        raise ValueError(
-            "GDSC metadata is missing columns required for COSMIC mapping: "
-            f"{sorted(missing)}"
-        )
-
-    metadata_mapping = metadata[
-        [
-            "COSMIC_ID",
-            "Sample Name",
-        ]
-    ].copy()
-
-    metadata_mapping["Sample Name"] = (
-        metadata_mapping["Sample Name"]
-        .astype("string")
-        .str.strip()
-    )
-
-    metadata_mapping = metadata_mapping[
-        metadata_mapping["Sample Name"].notna()
-        & metadata_mapping["Sample Name"].ne("")
-        & metadata_mapping["Sample Name"].str.upper().ne("TOTAL:")
-    ]
-
-    sample_mapping = expression[
-        [
-            "COSMIC_SAMPLE_ID",
-            "SAMPLE_NAME",
-        ]
-    ].drop_duplicates()
-
-    sample_counts = (
-        sample_mapping.groupby("SAMPLE_NAME")["COSMIC_SAMPLE_ID"]
-        .nunique()
-    )
-
-    ambiguous = sample_counts[sample_counts > 1]
-
-    if not ambiguous.empty:
-        raise ValueError(
-            "COSMIC SAMPLE_NAME maps to multiple COSMIC_SAMPLE_ID values: "
-            f"{ambiguous.index.tolist()[:10]}"
-        )
-
-    mapping = metadata_mapping.merge(
-        sample_mapping,
-        left_on="Sample Name",
-        right_on="SAMPLE_NAME",
-        how="left",
-        validate="one_to_one",
-    )
-
-    return mapping[
-        [
-            "COSMIC_ID",
-            "COSMIC_SAMPLE_ID",
-        ]
-    ].drop_duplicates("COSMIC_ID")
-
-
-def join_expression(
-    data: pd.DataFrame,
-    metadata: pd.DataFrame,
-    expression: pd.DataFrame,
-) -> pd.DataFrame:
-    """Join COSMIC expression features onto GDSC response data."""
-    mapping = map_cosmic_samples(
-        metadata,
-        expression,
-    )
-
-    result = data.merge(
-        mapping,
-        on="COSMIC_ID",
-        how="left",
-        validate="many_to_one",
-    )
-
-    result = result.merge(
-        expression,
-        on="COSMIC_SAMPLE_ID",
-        how="left",
-        validate="many_to_one",
-    )
-
-    return result
+        raise ValueError(f"GDSC metadata is missing mapping columns: {sorted(missing)}")
+    samples = pd.read_csv(Path(data_dir) / "raw" / COSMIC_SAMPLE_FILE, sep="\t", compression="gzip", usecols=["COSMIC_SAMPLE_ID", "SAMPLE_NAME"])
+    samples["SAMPLE_NAME"] = samples["SAMPLE_NAME"].astype("string").str.strip()
+    ambiguous = samples.groupby("SAMPLE_NAME")["COSMIC_SAMPLE_ID"].nunique()
+    ambiguous = ambiguous[ambiguous > 1].index.tolist()
+    if ambiguous:
+        raise ValueError(f"COSMIC SAMPLE_NAME maps to multiple IDs: {ambiguous[:10]}")
+    gdsc = gdsc_metadata[["COSMIC_ID", "Sample Name"]].drop_duplicates().copy()
+    gdsc["Sample Name"] = gdsc["Sample Name"].astype("string").str.strip()
+    gdsc = gdsc[gdsc["Sample Name"].notna() & gdsc["Sample Name"].ne("") & gdsc["Sample Name"].str.upper().ne("TOTAL:")]
+    mapping = gdsc.merge(samples.drop_duplicates("SAMPLE_NAME"), left_on="Sample Name", right_on="SAMPLE_NAME", how="left", validate="one_to_one")
+    unmatched = mapping.loc[mapping["COSMIC_SAMPLE_ID"].isna(), "Sample Name"].tolist()
+    diagnostics = {"gdsc_sample_names": len(gdsc), "cosmic_sample_names": samples["SAMPLE_NAME"].nunique(), "matched": int(mapping["COSMIC_SAMPLE_ID"].notna().sum()), "unmatched": len(unmatched), "unmatched_names": unmatched, "ambiguous_names": ambiguous}
+    return mapping[["COSMIC_ID", "COSMIC_SAMPLE_ID"]], diagnostics

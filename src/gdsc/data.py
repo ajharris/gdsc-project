@@ -8,11 +8,6 @@ from urllib.request import urlopen
 
 import pandas as pd
 
-from gdsc.cosmic import (
-    join_expression,
-    load_or_build_expression,
-)
-
 
 RELEASE = "8.4"
 RELEASE_DATE = "2022-07-24"
@@ -135,17 +130,16 @@ def _load_cell_line_metadata(
 def load_gdsc(
     data_dir="../data/raw",
     include_metadata=True,
-    include_expression=False,
 ) -> pd.DataFrame:
-    """Load GDSC responses with optional metadata and expression.
+    """Load GDSC responses with optional cell-line metadata only.
 
     GDSC1 and GDSC2 fitted response files are concatenated.
 
     When ``include_metadata`` is true, cell-line tissue and cancer
     metadata are joined using COSMIC_ID.
 
-    When ``include_expression`` is true, the cached COSMIC expression
-    matrix is loaded, or built and cached if it does not yet exist.
+    COSMIC expression is deliberately separate: use ``gdsc.cosmic`` targeted
+    feature queries in preprocessing, never a whole-table response join.
     """
     response_paths = _response_files(data_dir)
 
@@ -164,7 +158,7 @@ def load_gdsc(
 
     response_data.columns = response_data.columns.str.strip()
 
-    if not include_metadata and not include_expression:
+    if not include_metadata:
         return response_data
 
     metadata_path = (
@@ -187,17 +181,6 @@ def load_gdsc(
         suffixes=("", "_METADATA"),
         validate="many_to_one",
     )
-
-    if include_expression:
-        expression = load_or_build_expression(
-            data_dir
-        )
-
-        data = join_expression(
-            data=data,
-            metadata=metadata,
-            expression=expression,
-        )
 
     return data
 
@@ -300,14 +283,9 @@ def validate_gdsc(
 
 def prepare_gdsc(
     data_dir="../data/raw",
-    include_expression=False,
 ) -> pd.DataFrame:
     """Download, validate, and load the complete GDSC release."""
     download_gdsc(data_dir)
     validate_gdsc(data_dir)
 
-    return load_gdsc(
-        data_dir=data_dir,
-        include_metadata=True,
-        include_expression=include_expression,
-    )
+    return load_gdsc(data_dir)
