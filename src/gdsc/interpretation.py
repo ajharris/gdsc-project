@@ -19,3 +19,15 @@ def ridge_bootstrap_stability(model_factory, X_train, y_train, feature_names, *,
     X, y, rng = np.asarray(X_train), np.asarray(y_train), np.random.default_rng(random_state)
     values = np.asarray([model_factory().fit(X[idx], y[idx]).coef_ for idx in (rng.integers(0, len(y), len(y)) for _ in range(n_resamples))])
     return pd.DataFrame({"GENE_SYMBOL": list(feature_names), "COEFFICIENT_MEAN": values.mean(0), "COEFFICIENT_MEDIAN": np.median(values, 0), "COEFFICIENT_STD": values.std(0), "POSITIVE_FRACTION": (values > 0).mean(0), "NEGATIVE_FRACTION": (values < 0).mean(0)})
+
+
+def top_feature_correlations(X_train, genes, *, top_n=20) -> pd.DataFrame:
+    """Return deterministically ranked non-self Pearson correlations, training only."""
+    selected = list(genes)[:top_n]
+    matrix = pd.DataFrame(X_train, columns=getattr(X_train, "columns", None)).loc[:, selected].corr()
+    pairs = []
+    for left, gene_a in enumerate(selected):
+        for gene_b in selected[left + 1:]:
+            value = matrix.loc[gene_a, gene_b]
+            pairs.append((gene_a, gene_b, value, abs(value)))
+    return pd.DataFrame(pairs, columns=["GENE_A", "GENE_B", "CORRELATION", "ABS_CORRELATION"]).sort_values(["ABS_CORRELATION", "GENE_A", "GENE_B"], ascending=[False, True, True]).reset_index(drop=True)

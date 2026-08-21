@@ -195,3 +195,18 @@ documented arithmetic mean for repeated sample/gene Z-scores and cached once in
 the relevant cohort, cell lines, and genes, then queries only those rows using
 `load_expression_features`. The final modelling-table merge is therefore small,
 explicit, and performed only after feature restrictions have been chosen.
+
+## Feature interpretation
+
+The locked Ridge model (`alpha=100.0`) is interpreted by absolute signed
+coefficients on the unchanged COSMIC Z-score feature set. Coefficients indicate
+conditional predictive association with predicted AUC, not biological causation
+or a sensitivity/resistance mechanism. Training-only bootstrap refits report
+coefficient variation and sign consistency without tuning, changing features,
+or using test responses.
+
+Top-20 feature correlations are computed from training expression only and
+reported numerically without removing any genes. Correlation matters because
+Ridge can distribute predictive weight across correlated expression features;
+therefore a large individual coefficient need not mean that one gene alone is
+responsible for a prediction.
