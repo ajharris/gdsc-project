@@ -101,6 +101,24 @@ wins only an exact tie. Measurements from GDSC1 and GDSC2 are not averaged. A
 remaining duplicate `DRUG_ID × COSMIC_ID` pair *within* the chosen screen is a
 hard error, so the final response cohort always has one response per cell line.
 
+### Verified preprocessing handoff
+
+The approved initial experiment resolves to **Erlotinib** from **GDSC2** using
+**AUC**: the GDSC2-specific stable identifier is `DRUG_ID=1168`. Its response
+cohort contains 108 unique lung_NSCLC cell lines, with no missing AUC values or
+within-screen duplicate drug/cell-line pairs. Targeted COSMIC mapping retains
+106 cell lines with expression. The real, target-independent filtered matrix
+has 16,980 expression features. The reproducible grouped split (`random_state`
+42; 20% validation and 20% test) produces 63 training, 21 validation, and 22
+test cell lines.
+
+The training partition alone fits median imputation and the variance filter;
+validation and test are transformed using those learned training statistics.
+Scaling is disabled because COSMIC expression values are already Z-scores. The
+notebook creates `X_train`, `X_val`, `X_test`, their aligned targets and
+metadata, and the fitted preprocessing pipeline. It intentionally stops before
+any predictive model is fit.
+
 ## COSMIC expression feature store
 
 COSMIC v104 Cell Lines Project expression is cached separately as long-format
