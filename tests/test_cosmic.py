@@ -36,11 +36,16 @@ def cosmic_dir(tmp_path):
 
 
 def test_cache_is_long_deduplicated_and_reused(cosmic_dir, monkeypatch):
-    cache = cosmic.build_expression_cache(cosmic_dir, chunksize=2)
+    updates = []
+    cache = cosmic.build_expression_cache(cosmic_dir, chunksize=2, progress=updates.append, total_source_rows=4)
     assert cache == cosmic_dir / "processed" / cosmic.COSMIC_EXPRESSION_PARQUET
     result = pd.read_parquet(cache)
     assert set(result.columns) == set(cosmic.EXPRESSION_COLUMNS)
     assert result.loc[(result.COSMIC_SAMPLE_ID == "C1") & (result.GENE_SYMBOL == "TP53"), "Z_SCORE"].iloc[0] == pytest.approx(1.01)
+    assert any("Aggregated expression chunk" in update for update in updates)
+    assert any("4/4" in update for update in updates)
+    assert any("Writing" in update for update in updates)
+    assert updates[-1].startswith("Expression cache complete")
     monkeypatch.setattr(cosmic.pd, "read_csv", lambda *a, **k: (_ for _ in ()).throw(AssertionError("raw reread")))
     assert cosmic.build_expression_cache(cosmic_dir) == cache
 
@@ -52,6 +57,17 @@ def test_targeted_queries_are_restricted(cosmic_dir):
     assert cosmic.load_expression_features(cosmic_dir, genes=[]).empty
     with pytest.raises(ValueError, match="unrestricted"):
         cosmic.load_expression_features(cosmic_dir)
+
+
+def test_legacy_wide_parquet_in_raw_is_read_at_its_generated_location(tmp_path):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    pd.DataFrame({
+        "COSMIC_SAMPLE_ID": ["C1", "C2"], "SAMPLE_NAME": ["Alpha", "Beta"],
+        "TP53": [1.0, 2.0], "EGFR": [3.0, 4.0],
+    }).to_parquet(raw / cosmic.COSMIC_EXPRESSION_PARQUET, index=False)
+    result = cosmic.load_expression_features(tmp_path, cosmic_sample_ids=["C2"], genes=["EGFR"])
+    assert result.to_dict("records") == [{"COSMIC_SAMPLE_ID": "C2", "SAMPLE_NAME": "Beta", "GENE_SYMBOL": "EGFR", "Z_SCORE": 4.0}]
 
 
 def test_mapping_normalizes_names_excludes_total_and_reports_unmatched(cosmic_dir):

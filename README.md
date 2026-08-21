@@ -114,8 +114,12 @@ to retrieve only the features required by a later preprocessing step.
 ### File roles: source text, temporary SQLite, and Parquet
 
 `data/raw/` holds the downloaded, source-format files: GDSC response CSVs,
-the GDSC metadata workbook, and COSMIC compressed TSV files. They are inputs
-and are not rewritten by preprocessing. While `build_expression_cache` reads
+the GDSC metadata workbook, and COSMIC compressed TSV files. It may also
+contain the pre-existing legacy wide COSMIC Parquet matrix generated during
+earlier project work. The loader recognizes that file in its actual raw-data
+location and reads only requested samples/genes, converting the bounded result
+to the common long-format API. New cache builds write the preferred long-format
+Parquet store under `data/processed/`. While `build_expression_cache` reads
 the large COSMIC TSV in chunks, it uses a temporary SQLite database in the
 system temporary directory solely to accumulate duplicate sample/gene Z-scores
 without holding the full source in memory. This transient database is deleted

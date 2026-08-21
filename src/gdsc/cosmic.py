@@ -11,6 +11,7 @@ import sqlite3
 import tarfile
 import tempfile
 from pathlib import Path
+from typing import Callable
 from urllib.request import Request, urlopen
 
 import pandas as pd
@@ -86,17 +87,26 @@ def _normalise_expression(frame: pd.DataFrame) -> pd.DataFrame:
     return frame.dropna(subset=EXPRESSION_COLUMNS)
 
 
-def build_expression_cache(data_dir="data", *, rebuild=False, chunksize=250_000) -> Path:
+def build_expression_cache(
+    data_dir="data", *, rebuild=False, chunksize=250_000,
+    progress: Callable[[str], None] | None = None,
+    total_source_rows: int | None = None,
+) -> Path:
     """Create/reuse the long Parquet cache with arithmetic-mean duplicates.
 
     SQLite maintains per sample/gene sums and counts across input chunks, which
     preserves the documented duplicate-resolution policy without loading the
-    ~17.5M-row TSV into memory.
+    ~17.5M-row TSV into memory. Pass ``progress=print`` (or another callback)
+    to receive chunk and final-writing updates during this long operation.
+    ``total_source_rows`` is optional: supplying a verified source row count
+    enables percentage progress without an extra full-file scan.
     """
     root = Path(data_dir)
     raw, processed = root / "raw", root / "processed"
     cache = processed / COSMIC_EXPRESSION_PARQUET
     if cache.exists() and not rebuild:
+        if progress:
+            progress(f"Reusing existing expression cache: {cache}")
         return cache
     source = raw / COSMIC_EXPRESSION_FILE
     if not source.exists():
@@ -111,33 +121,87 @@ def build_expression_cache(data_dir="data", *, rebuild=False, chunksize=250_000)
     database = Path(database_name)
     connection = sqlite3.connect(database)
     try:
+        # This database is disposable intermediate state. Disabling durable
+        # journaling avoids a filesystem sync for every source chunk; the raw
+        # TSV remains intact and the final Parquet is written only after the
+        # aggregation succeeds.
+        connection.execute("PRAGMA journal_mode=OFF")
+        connection.execute("PRAGMA synchronous=OFF")
+        connection.execute("PRAGMA temp_store=MEMORY")
         connection.execute("CREATE TABLE expression (sample_id TEXT, sample_name TEXT, gene TEXT, total REAL, count INTEGER, PRIMARY KEY(sample_id, gene))")
-        for chunk in pd.read_csv(source, sep="\t", compression="gzip", chunksize=chunksize):
+        source_rows = 0
+        for chunk_number, chunk in enumerate(pd.read_csv(source, sep="\t", compression="gzip", chunksize=chunksize), start=1):
             values = _normalise_expression(chunk)
+            source_rows += len(chunk)
             grouped = values.groupby(["COSMIC_SAMPLE_ID", "SAMPLE_NAME", "GENE_SYMBOL"], as_index=False)["Z_SCORE"].agg(["sum", "count"]).reset_index()
             connection.executemany("INSERT INTO expression VALUES (?, ?, ?, ?, ?) ON CONFLICT(sample_id,gene) DO UPDATE SET total=total+excluded.total,count=count+excluded.count", grouped[["COSMIC_SAMPLE_ID", "SAMPLE_NAME", "GENE_SYMBOL", "sum", "count"]].itertuples(index=False, name=None))
             connection.commit()
+            if progress:
+                if total_source_rows:
+                    percent = 100 * source_rows / total_source_rows
+                    progress(f"Aggregated expression chunk {chunk_number:,}: {source_rows:,}/{total_source_rows:,} source rows ({percent:.1f}%).")
+                else:
+                    progress(f"Aggregated expression chunk {chunk_number:,} ({source_rows:,} source rows read).")
         import pyarrow as pa
         import pyarrow.parquet as pq
         writer = None
         try:
+            if progress:
+                progress("Writing the de-duplicated long-format Parquet cache.")
+            written_rows = 0
             for chunk in pd.read_sql_query("SELECT sample_id COSMIC_SAMPLE_ID, sample_name SAMPLE_NAME, gene GENE_SYMBOL, total/count Z_SCORE FROM expression", connection, chunksize=chunksize):
                 table = pa.Table.from_pandas(chunk, preserve_index=False)
                 writer = writer or pq.ParquetWriter(cache, table.schema, compression="zstd")
                 writer.write_table(table)
+                written_rows += len(chunk)
+                if progress:
+                    progress(f"Wrote {written_rows:,} expression feature rows to Parquet.")
         finally:
             if writer:
                 writer.close()
     finally:
         connection.close()
         database.unlink(missing_ok=True)
+    if progress:
+        progress(f"Expression cache complete: {cache}")
     return cache
 
 
 def load_expression_features(data_dir="data", *, cosmic_sample_ids=None, genes=None) -> pd.DataFrame:
-    """Read selected long-format features with Parquet predicate pushdown."""
+    """Read selected features from the current or legacy Parquet feature store.
+
+    New cache builds write a long-format file in ``data/processed``. Earlier
+    project runs generated a wide sample-by-gene Parquet matrix in ``data/raw``.
+    The compatibility branch reads only requested samples/genes from that file
+    and returns the same long-format API, so it never creates a response-by-gene
+    merge and callers do not need to relocate a large generated artifact.
+    """
     if cosmic_sample_ids is None and genes is None:
         raise ValueError("Specify cosmic_sample_ids and/or genes; unrestricted load is unsafe")
+    root = Path(data_dir)
+    processed_cache = root / "processed" / COSMIC_EXPRESSION_PARQUET
+    legacy_cache = root / "raw" / COSMIC_EXPRESSION_PARQUET
+    if not processed_cache.exists() and legacy_cache.exists():
+        import pyarrow.parquet as pq
+        sample_ids = list(dict.fromkeys(cosmic_sample_ids or []))
+        if not sample_ids:
+            raise ValueError("Legacy wide cache requires cosmic_sample_ids")
+        schema = pq.ParquetFile(legacy_cache).schema_arrow.names
+        gene_columns = [column for column in (genes or schema) if column not in {"COSMIC_SAMPLE_ID", "SAMPLE_NAME"}]
+        columns = [column for column in ["COSMIC_SAMPLE_ID", "SAMPLE_NAME", *gene_columns] if column in schema]
+        table = pq.read_table(
+            legacy_cache,
+            columns=columns,
+            filters=[("COSMIC_SAMPLE_ID", "in", sample_ids)],
+        )
+        wide = table.to_pandas()
+        if wide.empty:
+            return pd.DataFrame(columns=EXPRESSION_COLUMNS)
+        return wide.melt(
+            id_vars=["COSMIC_SAMPLE_ID", "SAMPLE_NAME"],
+            var_name="GENE_SYMBOL",
+            value_name="Z_SCORE",
+        ).dropna(subset=["Z_SCORE"]).reset_index(drop=True)
     cache = build_expression_cache(data_dir)
     import pyarrow.dataset as ds
     predicates = []

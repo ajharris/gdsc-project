@@ -22,6 +22,17 @@ def test_cohort_response_and_drug_eligibility(responses):
         prep.select_tissue(responses, "brain")
 
 
+def test_response_metric_selection_validates_supported_columns_and_preserves_missingness(responses):
+    with_missing = responses.copy()
+    with_missing.loc[0, "AUC"] = None
+    assert prep.select_response_metric(with_missing, "AUC").isna().sum() == 1
+    assert prep.select_response_metric(with_missing, "LN_IC50").tolist() == [1, 2, 3, 4, 5, 6]
+    with pytest.raises(ValueError, match="metric"):
+        prep.select_response_metric(with_missing, "IC50")
+    with pytest.raises(ValueError, match="does not contain"):
+        prep.select_response_metric(with_missing.drop(columns="AUC"), "AUC")
+
+
 def test_tissue_drug_and_duplicate_coverage_summaries(responses):
     duplicate = pd.concat([responses, responses.iloc[[0]].assign(DATASET="GDSC1")], ignore_index=True)
     tissues = prep.summarize_tissues(duplicate)
@@ -58,6 +69,21 @@ def test_eligibility_uses_unique_cell_lines_and_does_not_mutate_summary():
         prep.filter_eligible_drugs(summary, min_unique_cell_lines=0)
 
 
+def test_eligibility_report_has_exact_threshold_boundaries_and_counts():
+    summary = pd.DataFrame(
+        {
+            "DRUG_NAME": ["below", "exact", "above"],
+            "N_CELL_LINES": [74, 75, 76],
+            "N_OBSERVATIONS": [999, 75, 76],
+        }
+    ).set_index("DRUG_NAME", drop=False)
+    report = prep.eligibility_report(summary, min_unique_cell_lines=75)
+    assert report["threshold"] == 75
+    assert report["total_drugs"] == 3
+    assert report["eligible_drugs"].DRUG_NAME.tolist() == ["exact", "above"]
+    assert report["ineligible_drugs"].DRUG_NAME.tolist() == ["below"]
+
+
 def test_cohort_coverage_report_centralizes_notebook_diagnostics(responses):
     report = prep.analyze_cohort_drug_coverage(
         responses.assign(DRUG_ID=[10, 10, 10, 20, 20, 20]),
@@ -89,6 +115,8 @@ def test_initial_drug_selection_uses_coverage_then_lowest_stable_id():
     assert prep.eligibility_report(summary, min_unique_cell_lines=75)["total_drugs"] == 3
     with pytest.raises(ValueError, match="No drugs"):
         prep.select_initial_drug(summary, min_unique_cell_lines=76)
+    with pytest.raises(ValueError, match="requires DRUG_ID"):
+        prep.select_initial_drug(summary.drop(columns="DRUG_ID"), min_unique_cell_lines=75)
 
 
 def test_response_dataset_selection_uses_coverage_and_rejects_internal_duplicates(responses):
@@ -107,6 +135,39 @@ def test_response_dataset_selection_uses_coverage_and_rejects_internal_duplicate
         prep.select_response_dataset(duplicated, tissue_of_origin="lung", drug_name="d1")
 
 
+def test_response_dataset_tie_prefers_gdsc1_and_counts_missing_target(responses):
+    records = responses.loc[
+        responses.DRUG_NAME.eq("d1") & responses.TISSUE_OF_ORIGIN.eq("lung")
+    ].copy()
+    records["DRUG_ID"] = 10
+    records["DATASET"] = ["GDSC1", "GDSC1", "GDSC2"]
+    records = pd.concat(
+        [records, records.iloc[[2]].assign(COSMIC_ID=9, DATASET="GDSC2", AUC=None)],
+        ignore_index=True,
+    )
+    result = prep.select_response_dataset(records, tissue_of_origin="lung", drug_name="d1")
+    assert result["selected_dataset"] == "GDSC1"
+    assert result["n_excluded_response_rows"] == 0
+    assert result["dataset_coverage"].set_index("DATASET").loc["GDSC2", "N_MISSING_RESPONSE"] == 1
+    with pytest.raises(ValueError, match="response_metric"):
+        prep.select_response_dataset(records, tissue_of_origin="lung", drug_name="d1", response_metric="IC50")
+
+
+def test_initial_response_cohort_carries_one_screen_one_drug_and_audit_counts(responses):
+    data = responses.loc[responses.TISSUE_OF_ORIGIN.eq("lung")].copy()
+    data["DRUG_ID"] = [20, 20, 20, 30, 30]
+    data["DATASET"] = ["GDSC2"] * 5
+    result = prep.build_initial_response_cohort(
+        data, tissue_of_origin="lung", min_unique_cell_lines=3, response_metric="AUC"
+    )
+    final = result["response_cohort"]
+    assert result["selected_drug"]["DRUG_NAME"] == "d1"
+    assert result["selected_dataset"] == "GDSC2"
+    assert final.COSMIC_ID.nunique() == len(final) == 3
+    assert final.DRUG_ID.nunique() == final.DATASET.nunique() == 1
+    assert result["n_excluded_response_rows"] == 0
+
+
 def test_missingness_filter_and_training_only_transformer():
     X = pd.DataFrame({"variable": [1., 2., None], "constant": [1., 1., 1.], "empty": [None]*3})
     report = prep.analyze_expression_missingness(X)
@@ -115,6 +176,8 @@ def test_missingness_filter_and_training_only_transformer():
     transformer = prep.build_preprocessor(scaling=True)
     transformer.fit(X[["variable"]].iloc[:2])
     assert transformer.named_steps["imputer"].statistics_.tolist() == [1.5]
+    assert report["n_genes"] == 3 and report["n_cell_lines"] == 3
+    assert report["overall_missing_fraction"] == pytest.approx(4 / 9)
 
 
 def test_expression_dataset_is_targeted_aligned_and_excludes_metadata(responses, monkeypatch):
@@ -140,6 +203,27 @@ def test_expression_dataset_is_targeted_aligned_and_excludes_metadata(responses,
     assert "DRUG_ID" not in dataset.X
 
 
+def test_expression_dataset_reports_unmatched_and_training_transformer_ignores_validation(monkeypatch):
+    cohort = pd.DataFrame({
+        "COSMIC_ID": [1, 2], "Sample Name": ["a", "b"], "CELL_LINE_NAME": ["A", "B"],
+        "DRUG_ID": [10, 10], "DRUG_NAME": ["d", "d"], "DATASET": ["GDSC1", "GDSC1"],
+        "TISSUE_OF_ORIGIN": ["lung", "lung"], "AUC": [1.0, 2.0], "LN_IC50": [3.0, 4.0],
+    })
+    monkeypatch.setattr(prep, "build_sample_mapping", lambda frame, data_dir: (
+        pd.DataFrame({"COSMIC_ID": [1], "COSMIC_SAMPLE_ID": ["s1"]}), {"matched": 1}
+    ))
+    monkeypatch.setattr(prep, "load_expression_features", lambda *args, **kwargs: pd.DataFrame({
+        "COSMIC_SAMPLE_ID": ["s1"], "GENE_SYMBOL": ["g"], "Z_SCORE": [None]
+    }))
+    dataset = prep.build_expression_dataset(cohort, response_metric="AUC", max_gene_missing_fraction=1.0)
+    assert dataset.diagnostics["unmatched_ids"] == [2]
+    assert dataset.diagnostics["excluded_no_expression_ids"] == [1]
+    transformer = prep.build_preprocessor()
+    transformer.fit(pd.DataFrame({"g": [1.0, 2.0, None]}))
+    assert transformer.named_steps["imputer"].statistics_.tolist() == [1.5]
+    assert transformer.transform(pd.DataFrame({"g": [999.0]})).tolist() == [[999.0]]
+
+
 def test_drug_dataset_is_targeted_and_metadata_is_not_features(responses, monkeypatch):
     monkeypatch.setattr(prep, "build_sample_mapping", lambda frame, data_dir: (pd.DataFrame({"COSMIC_ID": frame.COSMIC_ID, "COSMIC_SAMPLE_ID": ["s1","s2","s3"]}), {"matched": 3}))
     monkeypatch.setattr(prep, "load_expression_features", lambda *args, **kwargs: pd.DataFrame({"COSMIC_SAMPLE_ID": ["s1","s1","s2","s2","s3","s3"], "SAMPLE_NAME": ["a"]*6, "GENE_SYMBOL": ["g1","g2"]*3, "Z_SCORE": [1.,2.,3.,4.,5.,6.]}))
@@ -155,3 +239,10 @@ def test_grouped_split_has_no_cell_line_overlap():
     splits = prep.split_by_cell_line(dataset, test_fraction=.2, validation_fraction=.2, random_state=7)
     sets = [set(split.metadata.COSMIC_ID) for split in splits.values()]
     assert not (sets[0] & sets[1] or sets[0] & sets[2] or sets[1] & sets[2])
+    repeat = prep.split_by_cell_line(dataset, test_fraction=.2, validation_fraction=.2, random_state=7)
+    assert repeat["test"].metadata.COSMIC_ID.tolist() == splits["test"].metadata.COSMIC_ID.tolist()
+    for split in splits.values():
+        assert len(split.X) == len(split.y) == len(split.metadata)
+        assert split.X.index.equals(split.y.index) and split.X.index.equals(split.metadata.index)
+    with pytest.raises(ValueError, match="less than one"):
+        prep.split_by_cell_line(dataset, test_fraction=.8, validation_fraction=.2)
