@@ -119,6 +119,39 @@ notebook creates `X_train`, `X_val`, `X_test`, their aligned targets and
 metadata, and the fitted preprocessing pipeline. It intentionally stops before
 any predictive model is fit.
 
+## Baseline modeling
+
+The baseline stage compares three fixed, validation-only models: a mean-response
+`DummyRegressor`, Ridge (`alpha=1.0`), and Elastic Net (`alpha=1.0`,
+`l1_ratio=0.5`). Model construction lives in `gdsc.models`; MAE, RMSE, Pearson,
+Spearman, and R² evaluation lives in `gdsc.evaluation`. Undefined correlations
+from constant predictions are explicitly reported as `NaN`.
+
+For the first experiment, the 63 training cell lines and 16,980 features give a
+feature-to-sample ratio of about 270:1, motivating regularized linear models.
+The 21-cell-line validation comparison found Ridge improved on the mean
+baseline (MAE 0.066239 vs. 0.068166; RMSE 0.081292 vs. 0.088695; Pearson
+0.445491). Fixed Elastic Net matched the mean baseline in this initial run.
+These are development diagnostics, not biological conclusions or final model
+selection. The 22-cell-line test partition remains untouched.
+
+### Final locked-model held-out evaluation
+
+Before opening the test set, the strategy was locked as Ridge with
+`alpha=100.0`: it had the best validation RMSE (0.081280) and the lowest
+three-fold training-CV RMSE variability (0.102637 ± 0.010035). The final rule
+was to fit the already configured model on the 63-cell-line training partition
+only, using the already-fitted training-only median imputer and variance filter.
+No hyperparameter search, feature change, preprocessing refit, or model-family
+change is permitted after this point.
+
+The one-time held-out evaluation on 22 cell lines yielded MAE/RMSE of
+0.050805/0.060515 for locked Ridge, versus 0.054069/0.061048 for the
+training-mean baseline. Ridge Pearson and Spearman correlations were 0.354313
+and 0.247883 (the constant baseline correlations are undefined and reported as
+`NaN`). These are the primary generalization results for this initial
+experiment; they represent a modest error improvement, not biological evidence.
+
 ## COSMIC expression feature store
 
 COSMIC v104 Cell Lines Project expression is cached separately as long-format
