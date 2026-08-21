@@ -28,7 +28,6 @@ EXPRESSION_REQUIRED_COLUMNS = set(EXPRESSION_COLUMNS) | {"COSMIC_GENE_ID", "REGU
 
 def _cosmic_request() -> Request:
     """Build an authenticated request without logging credentials."""
-    load_dotenv()
     link = os.environ.get("COSMIC_LINK", COSMIC_EXPRESSION_URL)
     authorization = os.environ.get("COSMIC_AUTHORIZATION")
     if link == COSMIC_EXPRESSION_URL and not authorization:

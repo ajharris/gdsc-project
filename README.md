@@ -64,7 +64,23 @@ only, and use that fitted transformer to transform held-out data.
 
 COSMIC v104 Cell Lines Project expression is cached separately as long-format
 `data/processed/cosmic_expression.parquet`. It is never merged onto the full
-GDSC response table. Configure `COSMIC_AUTHORIZATION` locally in `.env` (never
-commit it), then build the cache once with `build_expression_cache("data")`.
+GDSC response table. Configure either a user-specific signed `COSMIC_LINK` or
+`COSMIC_AUTHORIZATION` locally in `.env` (never commit either), then build the
+cache once with `build_expression_cache("data")`.
 Use `load_expression_features("data", cosmic_sample_ids=[...], genes=[...])`
 to retrieve only the features required by a later preprocessing step.
+
+### Why expression is queried rather than globally joined
+
+An earlier ingestion attempt merged the complete COSMIC expression matrix
+(about 17,000 genes) onto every GDSC drug-response observation (about 575,000
+rows). This would create a dense response-row-by-gene table and failed with a
+memory allocation request of roughly 72.8 GiB.
+
+The replacement is a feature-store design: GDSC responses and metadata remain
+lightweight; COSMIC expression is de-duplicated in long format using the
+documented arithmetic mean for repeated sample/gene Z-scores and cached once in
+`data/processed/cosmic_expression.parquet`. Later preprocessing first selects
+the relevant cohort, cell lines, and genes, then queries only those rows using
+`load_expression_features`. The final modelling-table merge is therefore small,
+explicit, and performed only after feature restrictions have been chosen.
