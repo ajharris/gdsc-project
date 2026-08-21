@@ -60,6 +60,21 @@ This avoids a global imputation fit. If later modelling requires imputation or
 scaling, call `build_training_transformer(...)`, fit it on training features
 only, and use that fitted transformer to transform held-out data.
 
+### Drug-specific preprocessing and leakage control
+
+The modelling observation unit is **one cell line for one selected drug**.
+`build_drug_dataset` first selects a tissue, applies explicit per-drug
+observation/cell-line eligibility thresholds, maps only the remaining cell
+lines to COSMIC, and requests only specified genes. It returns expression-only
+`X`, the explicitly selected `AUC` or `LN_IC50` target `y`, and separate
+metadata. Missingness and variance helpers expose filtering choices rather
+than silently dropping values.
+
+`split_by_cell_line` uses grouped splitting on `COSMIC_ID`, so a cell line can
+never occur in more than one train/validation/test split. `build_preprocessor`
+returns an unfitted imputer/variance-filter/optional-scaler pipeline; fit it on
+the training split only before transforming validation or test data.
+
 ## COSMIC expression feature store
 
 COSMIC v104 Cell Lines Project expression is cached separately as long-format

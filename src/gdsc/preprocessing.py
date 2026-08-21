@@ -13,6 +13,13 @@ from dataclasses import dataclass
 from typing import Literal
 
 import pandas as pd
+from sklearn.impute import SimpleImputer
+from sklearn.model_selection import GroupShuffleSplit
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.feature_selection import VarianceThreshold
+
+from gdsc.cosmic import build_sample_mapping, load_expression_features
 
 
 DEFAULT_METADATA_COLUMNS = (
@@ -39,6 +46,20 @@ class PreprocessedGDSC:
     y: pd.Series
     metadata: pd.DataFrame
     info: dict[str, object]
+
+
+@dataclass(frozen=True)
+class AnalysisDataset:
+    """One-drug, one-row-per-cell-line modelling dataset.
+
+    Expression is queried only for the selected mapped cell lines and requested
+    genes. Metadata deliberately remains outside ``X``.
+    """
+
+    X: pd.DataFrame
+    y: pd.Series
+    metadata: pd.DataFrame
+    diagnostics: dict[str, object]
 
 
 def _validate_fraction(value: float, name: str) -> None:
@@ -71,6 +92,105 @@ def summarize_drugs(
 ) -> pd.DataFrame:
     """Summarize retained observations and cell lines by drug identity."""
     return _summary(metadata, drug_column, "drug")
+
+
+def select_tissue(data: pd.DataFrame, tissue_of_origin: str) -> pd.DataFrame:
+    """Return a case-insensitive tissue cohort without mutating ``data``."""
+    if "TISSUE_OF_ORIGIN" not in data:
+        raise ValueError("Data does not contain TISSUE_OF_ORIGIN")
+    cohort = data.loc[data["TISSUE_OF_ORIGIN"].astype("string").str.casefold().eq(tissue_of_origin.casefold())].copy()
+    if cohort.empty:
+        available = sorted(data["TISSUE_OF_ORIGIN"].dropna().astype(str).unique())
+        raise ValueError(f"Unknown or empty tissue {tissue_of_origin!r}; available: {available}")
+    return cohort
+
+
+def select_response_metric(data: pd.DataFrame, metric: str = "AUC") -> pd.Series:
+    """Return the explicitly requested non-missing GDSC response target."""
+    if metric not in {"AUC", "LN_IC50"}:
+        raise ValueError("metric must be 'AUC' or 'LN_IC50'")
+    if metric not in data:
+        raise ValueError(f"Data does not contain response metric {metric!r}")
+    return data[metric].copy().rename("y")
+
+
+def drug_eligibility(
+    cohort: pd.DataFrame, *, min_observations_per_drug: int, min_unique_cell_lines_per_drug: int
+) -> pd.DataFrame:
+    """Summarize and flag drugs using counts within the supplied cohort only."""
+    if min_observations_per_drug < 1 or min_unique_cell_lines_per_drug < 1:
+        raise ValueError("Eligibility thresholds must be at least one")
+    summary = cohort.groupby("DRUG_NAME", dropna=False).agg(n_observations=("DRUG_NAME", "size"), n_cell_lines=("COSMIC_ID", "nunique")).reset_index()
+    summary["eligible"] = summary["n_observations"].ge(min_observations_per_drug) & summary["n_cell_lines"].ge(min_unique_cell_lines_per_drug)
+    return summary.sort_values("n_observations", ascending=False).reset_index(drop=True)
+
+
+def analyze_expression_missingness(X: pd.DataFrame) -> dict[str, object]:
+    """Return feature and cell-line missingness before any imputation."""
+    return {"gene_missing_fraction": X.isna().mean(), "cell_line_missing_fraction": X.isna().mean(axis=1), "total_missing": int(X.isna().sum().sum()), "all_missing_genes": X.columns[X.isna().all()].tolist(), "empty_cell_lines": X.index[X.isna().all(axis=1)].tolist()}
+
+
+def filter_expression_features(X: pd.DataFrame, *, max_gene_missing_fraction: float = 0.2, max_cell_line_missing_fraction: float = 1.0, min_variance: float = 0.0) -> pd.DataFrame:
+    """Remove overly missing rows/features and zero/near-zero variance genes.
+
+    Defaults are transparent starting points; numeric filtering should be fitted
+    on training data in a production evaluation when cohort-wide leakage is a concern.
+    """
+    _validate_fraction(max_gene_missing_fraction, "max_gene_missing_fraction")
+    _validate_fraction(max_cell_line_missing_fraction, "max_cell_line_missing_fraction")
+    filtered = X.loc[X.isna().mean(axis=1).le(max_cell_line_missing_fraction)].copy()
+    filtered = filtered.loc[:, filtered.isna().mean().le(max_gene_missing_fraction)]
+    return filtered.loc[:, filtered.var(skipna=True).gt(min_variance)]
+
+
+def build_drug_dataset(
+    responses: pd.DataFrame, *, drug_name: str, tissue_of_origin: str, response_metric: str,
+    genes: list[str], data_dir="data", min_observations_per_drug: int = 1, min_unique_cell_lines_per_drug: int = 1,
+) -> AnalysisDataset:
+    """Build a bounded, drug-specific dataset; never a full response/gene join."""
+    cohort = select_tissue(responses, tissue_of_origin)
+    eligibility = drug_eligibility(cohort, min_observations_per_drug=min_observations_per_drug, min_unique_cell_lines_per_drug=min_unique_cell_lines_per_drug)
+    row = eligibility.loc[eligibility["DRUG_NAME"].eq(drug_name)]
+    if row.empty or not bool(row["eligible"].iloc[0]):
+        raise ValueError(f"Drug {drug_name!r} is not eligible in tissue {tissue_of_origin!r}")
+    selected = cohort.loc[cohort["DRUG_NAME"].eq(drug_name) & cohort[response_metric].notna()].copy()
+    if selected.duplicated("COSMIC_ID").any():
+        raise ValueError("Drug-specific dataset requires one response per COSMIC_ID")
+    mapping, mapping_info = build_sample_mapping(selected[["COSMIC_ID", "Sample Name"]], data_dir)
+    selected = selected.merge(mapping, on="COSMIC_ID", how="left", validate="one_to_one")
+    mapped = selected.loc[selected["COSMIC_SAMPLE_ID"].notna()].copy()
+    expression = load_expression_features(data_dir, cosmic_sample_ids=mapped["COSMIC_SAMPLE_ID"].tolist(), genes=genes)
+    wide = expression.pivot(index="COSMIC_SAMPLE_ID", columns="GENE_SYMBOL", values="Z_SCORE").reindex(mapped["COSMIC_SAMPLE_ID"])
+    wide.index = mapped.index
+    available = wide.notna().any(axis=1)
+    metadata_columns = [column for column in ("COSMIC_ID", "COSMIC_SAMPLE_ID", "CELL_LINE_NAME", "DRUG_NAME", "TISSUE_OF_ORIGIN", "CANCER_TYPE", "DATASET") if column in mapped]
+    metadata = mapped.loc[available, metadata_columns].copy()
+    X = wide.loc[available].copy()
+    y = mapped.loc[available, response_metric].copy().rename("y")
+    diagnostics = {"drug_eligibility": eligibility, "mapping": mapping_info, "n_response_cell_lines": int(selected["COSMIC_ID"].nunique()), "n_mapped_to_cosmic": len(mapped), "n_with_expression": int(available.sum()), "n_excluded": int((~available).sum()), "excluded_ids": mapped.loc[~available, "COSMIC_ID"].tolist()}
+    return AnalysisDataset(X=X, y=y, metadata=metadata, diagnostics=diagnostics)
+
+
+def split_by_cell_line(dataset: AnalysisDataset, *, test_fraction: float = 0.2, validation_fraction: float = 0.2, random_state: int = 42) -> dict[str, AnalysisDataset]:
+    """Create train/validation/test splits with no COSMIC_ID overlap."""
+    _validate_fraction(test_fraction, "test_fraction"); _validate_fraction(validation_fraction, "validation_fraction")
+    if test_fraction + validation_fraction >= 1:
+        raise ValueError("test_fraction + validation_fraction must be less than one")
+    groups = dataset.metadata["COSMIC_ID"]
+    train_val, test = next(GroupShuffleSplit(n_splits=1, test_size=test_fraction, random_state=random_state).split(dataset.X, groups=groups))
+    validation_relative = validation_fraction / (1 - test_fraction)
+    train, validation = next(GroupShuffleSplit(n_splits=1, test_size=validation_relative, random_state=random_state).split(dataset.X.iloc[train_val], groups=groups.iloc[train_val]))
+    def subset(indices):
+        return AnalysisDataset(dataset.X.iloc[indices].copy(), dataset.y.iloc[indices].copy(), dataset.metadata.iloc[indices].copy(), dataset.diagnostics)
+    return {"train": subset(train_val[train]), "validation": subset(train_val[validation]), "test": subset(test)}
+
+
+def build_preprocessor(*, imputation: str = "median", scaling: bool = False, variance_threshold: float = 0.0) -> Pipeline:
+    """Return an unfitted pipeline; callers fit it on the training split only."""
+    steps = [("imputer", SimpleImputer(strategy=imputation)), ("variance_filter", VarianceThreshold(threshold=variance_threshold))]
+    if scaling:
+        steps.append(("scaler", StandardScaler()))
+    return Pipeline(steps)
 
 
 def build_training_transformer(
