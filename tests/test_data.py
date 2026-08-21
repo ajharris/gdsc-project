@@ -93,6 +93,11 @@ class DownloadGdscTests(unittest.TestCase):
 
 
 class LoadGdscTests(unittest.TestCase):
+    def test_never_loads_cosmic_expression(self):
+        # The GDSC API has no expression option; expression is queried separately.
+        self.assertNotIn("include_expression", data.load_gdsc.__code__.co_varnames)
+        self.assertNotIn("from gdsc.cosmic", Path(data.__file__).read_text())
+
     def test_loads_both_response_files_and_merges_metadata(self):
         with TemporaryDirectory() as directory:
             directory = Path(directory)
