@@ -22,6 +22,22 @@ def test_cohort_response_and_drug_eligibility(responses):
         prep.select_tissue(responses, "brain")
 
 
+def test_tissue_drug_and_duplicate_coverage_summaries(responses):
+    duplicate = pd.concat([responses, responses.iloc[[0]].assign(DATASET="GDSC1")], ignore_index=True)
+    tissues = prep.summarize_tissues(duplicate)
+    assert tissues.loc["lung", "CELL_LINES"] == 5
+    assert tissues.loc["lung", "RESPONSE_OBSERVATIONS"] == 6
+    drugs = prep.summarize_drugs(duplicate)
+    d1 = drugs.set_index("DRUG_NAME").loc["d1"]
+    assert d1.N_CELL_LINES == 4 and d1.N_OBSERVATIONS == 5
+    assert set(d1.DATASETS) == {"GDSC1", "GDSC2"}
+    diagnostics = prep.response_duplicate_diagnostics(duplicate)
+    assert diagnostics["n_duplicated_drug_cell_line_pairs"] == 1
+    assert diagnostics["max_records_per_pair"] == 2
+    coverage = prep.drug_coverage_distribution(drugs, thresholds=(2, 4))
+    assert coverage["threshold_counts"] == {2: 2, 4: 1}
+
+
 def test_missingness_filter_and_training_only_transformer():
     X = pd.DataFrame({"variable": [1., 2., None], "constant": [1., 1., 1.], "empty": [None]*3})
     report = prep.analyze_expression_missingness(X)

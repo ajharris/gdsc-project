@@ -81,17 +81,75 @@ def _summary(metadata: pd.DataFrame, column: str, label: str) -> pd.DataFrame:
 
 
 def summarize_tissues(
-    metadata: pd.DataFrame, tissue_column: str = "TISSUE_OF_ORIGIN"
+    data: pd.DataFrame, tissue_column: str = "TISSUE_OF_ORIGIN"
 ) -> pd.DataFrame:
-    """Summarize retained observations and cell lines by tissue of origin."""
-    return _summary(metadata, tissue_column, "tissue")
+    """Summarize tissue coverage; missing tissue labels form their own group."""
+    if tissue_column not in data:
+        raise ValueError(f"Data does not contain {tissue_column!r}")
+    summary = (data.groupby(tissue_column, dropna=False)
+        .agg(CELL_LINES=("COSMIC_ID", "nunique"), DRUGS=("DRUG_NAME", "nunique"), RESPONSE_OBSERVATIONS=(tissue_column, "size"))
+        .sort_values(["CELL_LINES", "RESPONSE_OBSERVATIONS"], ascending=False))
+    # Legacy aliases preserve the earlier small summary API.
+    summary["cell_lines"] = summary["CELL_LINES"]
+    summary["observations"] = summary["RESPONSE_OBSERVATIONS"]
+    return summary
 
 
 def summarize_drugs(
-    metadata: pd.DataFrame, drug_column: str = "DRUG_NAME"
+    data: pd.DataFrame, drug_column: str = "DRUG_NAME"
 ) -> pd.DataFrame:
-    """Summarize retained observations and cell lines by drug identity."""
-    return _summary(metadata, drug_column, "drug")
+    """Describe drug coverage within a supplied cohort.
+
+    ``N_CELL_LINES`` is the primary sample-size diagnostic: response rows are
+    not independent when a drug/cell-line pair has repeated fitted records.
+    """
+    required = {drug_column, "COSMIC_ID"}
+    missing = required - set(data.columns)
+    if missing:
+        raise ValueError(f"Data is missing drug-summary columns: {sorted(missing)}")
+    # Coverage is reported per named compound. A name can have more than one
+    # source identifier across releases, which is retained rather than splitting
+    # its independent cell-line coverage into artificial rows.
+    grouping = [drug_column]
+    summary = data.groupby(grouping, dropna=False).agg(N_OBSERVATIONS=(drug_column, "size"), N_CELL_LINES=("COSMIC_ID", "nunique")).reset_index()
+    for metric in ("AUC", "LN_IC50"):
+        availability = f"N_{metric}_AVAILABLE"
+        fraction = f"{metric}_MISSING_FRACTION"
+        if metric in data:
+            counts = data.groupby(grouping, dropna=False)[metric].count().rename(availability).reset_index()
+            summary = summary.merge(counts, on=grouping, how="left")
+            summary[fraction] = 1 - summary[availability] / summary.N_OBSERVATIONS
+        else:
+            summary[availability] = pd.NA
+            summary[fraction] = pd.NA
+    if "DATASET" in data:
+        datasets = data.groupby(grouping, dropna=False)["DATASET"].agg(lambda values: tuple(sorted(values.dropna().unique())))
+        summary = summary.merge(datasets.rename("DATASETS").reset_index(), on=grouping, how="left")
+    for column in ("PUTATIVE_TARGET",):
+        if column in data:
+            context = data.groupby(grouping, dropna=False)[column].agg(lambda values: tuple(sorted(values.dropna().unique())))
+            summary = summary.merge(context.rename(column).reset_index(), on=grouping, how="left")
+    if "DRUG_ID" in data:
+        identifiers = data.groupby(grouping, dropna=False)["DRUG_ID"].agg(lambda values: tuple(sorted(values.dropna().unique())))
+        summary = summary.merge(identifiers.rename("DRUG_ID").reset_index(), on=grouping, how="left")
+    summary["observations"] = summary["N_OBSERVATIONS"]
+    summary["cell_lines"] = summary["N_CELL_LINES"]
+    return summary.sort_values(["N_CELL_LINES", "N_OBSERVATIONS", drug_column], ascending=[False, False, True]).set_index(drug_column, drop=False)
+
+
+def response_duplicate_diagnostics(data: pd.DataFrame) -> dict[str, object]:
+    """Describe repeated stable drug/cell-line pairs without resolving them."""
+    drug = "DRUG_ID" if "DRUG_ID" in data else "DRUG_NAME"
+    counts = data.groupby([drug, "COSMIC_ID"], dropna=False).size()
+    duplicate = counts[counts.gt(1)]
+    return {"n_unique_drug_cell_line_pairs": len(counts), "n_duplicated_drug_cell_line_pairs": len(duplicate), "max_records_per_pair": int(counts.max()) if len(counts) else 0, "duplicated_pairs": duplicate.rename("N_RECORDS").reset_index()}
+
+
+def drug_coverage_distribution(drug_summary: pd.DataFrame, thresholds=(20, 30, 40, 50, 60, 75, 90)) -> dict[str, object]:
+    """Return descriptive cell-line coverage statistics, not eligibility rules."""
+    if "N_CELL_LINES" not in drug_summary:
+        raise ValueError("drug_summary must contain N_CELL_LINES")
+    return {"distribution": drug_summary.N_CELL_LINES.describe(), "threshold_counts": {threshold: int(drug_summary.N_CELL_LINES.ge(threshold).sum()) for threshold in thresholds}}
 
 
 def select_tissue(data: pd.DataFrame, tissue_of_origin: str) -> pd.DataFrame:

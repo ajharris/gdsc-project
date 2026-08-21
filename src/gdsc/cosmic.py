@@ -15,8 +15,11 @@ from urllib.request import Request, urlopen
 import pandas as pd
 from dotenv import load_dotenv
 
-load_dotenv(".env.example")
-load_dotenv()
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# Resolve configuration from the project, not the caller's working directory;
+# notebooks execute from ``notebook/`` while command-line use often starts at root.
+load_dotenv(PROJECT_ROOT / ".env.example")
+load_dotenv(PROJECT_ROOT / ".env")
 COSMIC_EXPRESSION_ARCHIVE = os.environ["COSMIC_EXPRESSION_ARCHIVE"]
 COSMIC_EXPRESSION_FILE = os.environ["COSMIC_EXPRESSION_FILE"]
 COSMIC_SAMPLE_FILE = os.environ["COSMIC_SAMPLE_FILE"]

@@ -75,6 +75,16 @@ never occur in more than one train/validation/test split. `build_preprocessor`
 returns an unfitted imputer/variance-filter/optional-scaler pipeline; fit it on
 the training split only before transforming validation or test data.
 
+### Initial NSCLC coverage analysis
+
+The first cohort is `lung_NSCLC`, selected because it has the largest observed
+number of GDSC cell lines (108). This is a documented initial analysis choice,
+not a hard-coded restriction. `summarize_tissues`, `summarize_drugs`,
+`response_duplicate_diagnostics`, and `drug_coverage_distribution` describe
+coverage without selecting a drug or imposing an eligibility threshold.
+`N_CELL_LINES` is the primary drug-level sample-size statistic; response rows
+can repeat a drug/cell-line pair and are diagnosed, not averaged or discarded.
+
 ## COSMIC expression feature store
 
 COSMIC v104 Cell Lines Project expression is cached separately as long-format
