@@ -137,19 +137,216 @@ def summarize_drugs(
     return summary.sort_values(["N_CELL_LINES", "N_OBSERVATIONS", drug_column], ascending=[False, False, True]).set_index(drug_column, drop=False)
 
 
+def drug_identity_diagnostics(data: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """Expose name/ID ambiguity rather than silently collapsing identities."""
+    if not {"DRUG_NAME", "DRUG_ID"}.issubset(data.columns):
+        raise ValueError("Drug identity diagnostics require DRUG_NAME and DRUG_ID")
+    names = data.groupby("DRUG_NAME", dropna=False)["DRUG_ID"].nunique()
+    identifiers = data.groupby("DRUG_ID", dropna=False)["DRUG_NAME"].nunique()
+    return {"name_to_multiple_ids": names[names.gt(1)].rename("N_DRUG_IDS").reset_index(), "id_to_multiple_names": identifiers[identifiers.gt(1)].rename("N_DRUG_NAMES").reset_index()}
+
+
 def response_duplicate_diagnostics(data: pd.DataFrame) -> dict[str, object]:
     """Describe repeated stable drug/cell-line pairs without resolving them."""
     drug = "DRUG_ID" if "DRUG_ID" in data else "DRUG_NAME"
     counts = data.groupby([drug, "COSMIC_ID"], dropna=False).size()
     duplicate = counts[counts.gt(1)]
-    return {"n_unique_drug_cell_line_pairs": len(counts), "n_duplicated_drug_cell_line_pairs": len(duplicate), "max_records_per_pair": int(counts.max()) if len(counts) else 0, "duplicated_pairs": duplicate.rename("N_RECORDS").reset_index()}
+    pairs = duplicate.rename("N_RECORDS").reset_index()
+    if "DATASET" in data and not pairs.empty:
+        datasets = data.groupby([drug, "COSMIC_ID"], dropna=False)["DATASET"].agg(lambda values: tuple(sorted(values.dropna().unique()))).rename("DATASETS").reset_index()
+        pairs = pairs.merge(datasets, on=[drug, "COSMIC_ID"], how="left")
+    return {"n_drug_cell_line_records": len(data), "n_unique_drug_cell_line_pairs": len(counts), "n_duplicated_drug_cell_line_pairs": len(duplicate), "max_records_per_pair": int(counts.max()) if len(counts) else 0, "duplicated_pairs": pairs}
 
 
-def drug_coverage_distribution(drug_summary: pd.DataFrame, thresholds=(20, 30, 40, 50, 60, 75, 90)) -> dict[str, object]:
+def drug_coverage_distribution(drug_summary: pd.DataFrame, thresholds=(20, 30, 40, 50, 60, 75, 90, 100)) -> dict[str, object]:
     """Return descriptive cell-line coverage statistics, not eligibility rules."""
     if "N_CELL_LINES" not in drug_summary:
         raise ValueError("drug_summary must contain N_CELL_LINES")
     return {"distribution": drug_summary.N_CELL_LINES.describe(), "threshold_counts": {threshold: int(drug_summary.N_CELL_LINES.ge(threshold).sum()) for threshold in thresholds}}
+
+
+def filter_eligible_drugs(drug_summary: pd.DataFrame, *, min_unique_cell_lines: int) -> pd.DataFrame:
+    """Return drugs meeting an explicit independent-cell-line threshold.
+
+    This only establishes modelling eligibility; it deliberately does not pick a
+    drug, response metric, or resolve repeated drug/cell-line response records.
+    """
+    if min_unique_cell_lines < 1:
+        raise ValueError("min_unique_cell_lines must be at least one")
+    if "N_CELL_LINES" not in drug_summary:
+        raise ValueError("drug_summary must contain N_CELL_LINES")
+    return drug_summary.loc[drug_summary["N_CELL_LINES"].ge(min_unique_cell_lines)].copy()
+
+
+def eligibility_report(drug_summary: pd.DataFrame, *, min_unique_cell_lines: int) -> dict[str, object]:
+    """Document the configured eligibility rule and its result."""
+    eligible = filter_eligible_drugs(
+        drug_summary, min_unique_cell_lines=min_unique_cell_lines
+    )
+    return {
+        "threshold": min_unique_cell_lines,
+        "total_drugs": len(drug_summary),
+        "eligible_drugs": eligible,
+        "ineligible_drugs": drug_summary.loc[~drug_summary.index.isin(eligible.index)].copy(),
+    }
+
+
+def _lowest_drug_id(value: object) -> int:
+    """Return the deterministic tie-breaker from a summary's ID field."""
+    values = value if isinstance(value, tuple) else (value,)
+    values = [int(identifier) for identifier in values if pd.notna(identifier)]
+    if not values:
+        raise ValueError("Drug selection requires at least one non-missing DRUG_ID")
+    return min(values)
+
+
+def select_initial_drug(drug_summary: pd.DataFrame, *, min_unique_cell_lines: int) -> pd.Series:
+    """Select the highest-coverage eligible drug, breaking ties by lowest ID.
+
+    The rule is deterministic and data-availability based; it does not imply a
+    biological preference.  ``DRUG_ID`` in the returned selection is the
+    tie-breaker ID. The final screen-specific ID is established separately.
+    """
+    if "DRUG_ID" not in drug_summary:
+        raise ValueError("Initial drug selection requires DRUG_ID in drug_summary")
+    eligible = filter_eligible_drugs(
+        drug_summary, min_unique_cell_lines=min_unique_cell_lines
+    ).reset_index(drop=True)
+    if eligible.empty:
+        raise ValueError("No drugs satisfy the configured eligibility threshold")
+    eligible["_TIE_BREAK_DRUG_ID"] = eligible["DRUG_ID"].map(_lowest_drug_id)
+    selected = eligible.sort_values(
+        ["N_CELL_LINES", "_TIE_BREAK_DRUG_ID", "DRUG_NAME"],
+        ascending=[False, True, True],
+    ).iloc[0].copy()
+    selected["DRUG_IDS"] = selected["DRUG_ID"]
+    selected["DRUG_ID"] = selected.pop("_TIE_BREAK_DRUG_ID")
+    return selected
+
+
+def select_response_dataset(
+    data: pd.DataFrame,
+    *,
+    tissue_of_origin: str,
+    drug_name: str,
+    response_metric: str = "AUC",
+) -> dict[str, object]:
+    """Choose one GDSC screen by usable cell-line coverage, never by averaging.
+
+    GDSC1 wins an exact coverage tie.  Within the chosen screen a repeated
+    stable ``DRUG_ID × COSMIC_ID`` pair is an error, not a deduplication step.
+    """
+    if response_metric not in {"AUC", "LN_IC50"}:
+        raise ValueError("response_metric must be 'AUC' or 'LN_IC50'")
+    cohort = select_tissue(data, tissue_of_origin)
+    selected = cohort.loc[cohort["DRUG_NAME"].eq(drug_name)].copy()
+    if selected.empty:
+        raise ValueError(f"Drug {drug_name!r} is absent from tissue {tissue_of_origin!r}")
+    required = {"DATASET", "DRUG_ID", "COSMIC_ID", response_metric}
+    missing = required - set(selected.columns)
+    if missing:
+        raise ValueError(f"Response dataset selection is missing columns: {sorted(missing)}")
+    summary = (
+        selected.groupby("DATASET", dropna=False)
+        .agg(
+            N_RESPONSE_ROWS=("COSMIC_ID", "size"),
+            N_CELL_LINES=("COSMIC_ID", "nunique"),
+            N_USABLE_RESPONSE_CELL_LINES=(response_metric, lambda values: selected.loc[values.index].loc[values.notna(), "COSMIC_ID"].nunique()),
+            N_MISSING_RESPONSE=(response_metric, lambda values: int(values.isna().sum())),
+        )
+        .reset_index()
+    )
+    # AUC/LN_IC50 availability defines response coverage. GDSC1 is the stated
+    # deterministic convention when screen coverage is tied.
+    summary["_DATASET_TIE_BREAK"] = summary["DATASET"].ne("GDSC1").astype(int)
+    chosen_dataset = summary.sort_values(
+        ["N_USABLE_RESPONSE_CELL_LINES", "_DATASET_TIE_BREAK", "DATASET"],
+        ascending=[False, True, True],
+    ).iloc[0]["DATASET"]
+    source = selected.loc[selected["DATASET"].eq(chosen_dataset)].copy()
+    ids = source["DRUG_ID"].dropna().unique()
+    if len(ids) != 1:
+        raise ValueError("Chosen response dataset contains more than one DRUG_ID")
+    duplicate = source.groupby(["DRUG_ID", "COSMIC_ID"], dropna=False).size()
+    duplicate = duplicate[duplicate.gt(1)].rename("N_RECORDS").reset_index()
+    if not duplicate.empty:
+        raise ValueError(
+            "Within-dataset DRUG_ID × COSMIC_ID duplicates remain; inspect "
+            f"diagnostics: {duplicate.to_dict('records')}"
+        )
+    missing_target = source.loc[source[response_metric].isna()].copy()
+    response_cohort = source.loc[source[response_metric].notna()].copy()
+    return {
+        "dataset_coverage": summary.drop(columns="_DATASET_TIE_BREAK"),
+        "selected_dataset": chosen_dataset,
+        "selected_drug_id": int(ids[0]),
+        "response_cohort": response_cohort,
+        "missing_target_rows": missing_target,
+        "n_excluded_response_rows": len(missing_target),
+        "within_dataset_duplicates": duplicate,
+    }
+
+
+def build_initial_response_cohort(
+    data: pd.DataFrame,
+    *,
+    tissue_of_origin: str = "lung_NSCLC",
+    min_unique_cell_lines: int = 75,
+    response_metric: str = "AUC",
+) -> dict[str, object]:
+    """Build the approved response cohort before any expression is accessed."""
+    tissue = select_tissue(data, tissue_of_origin)
+    summary = summarize_drugs(tissue)
+    selection = select_initial_drug(
+        summary, min_unique_cell_lines=min_unique_cell_lines
+    )
+    screen = select_response_dataset(
+        tissue,
+        tissue_of_origin=tissue_of_origin,
+        drug_name=selection["DRUG_NAME"],
+        response_metric=response_metric,
+    )
+    return {
+        "eligibility": eligibility_report(summary, min_unique_cell_lines=min_unique_cell_lines),
+        "selected_drug": selection,
+        "response_metric": response_metric,
+        **screen,
+    }
+
+
+def analyze_cohort_drug_coverage(
+    data: pd.DataFrame,
+    *,
+    tissue_of_origin: str,
+    thresholds: tuple[int, ...] = (20, 30, 40, 50, 60, 75, 90, 100),
+) -> dict[str, object]:
+    """Return the complete, non-destructive drug-coverage review for a cohort.
+
+    The result intentionally contains diagnostics and a threshold decision table,
+    not a selected drug or an implicit duplicate-response policy.  This keeps
+    notebook reporting concise while preserving the scientific decisions for the
+    caller to make explicitly.
+    """
+    cohort = select_tissue(data, tissue_of_origin)
+    drug_summary = summarize_drugs(cohort)
+    coverage = drug_coverage_distribution(drug_summary, thresholds=thresholds)
+    decision_table = pd.DataFrame(
+        {
+            "minimum_unique_cell_lines": thresholds,
+            "eligible_drugs": [
+                len(filter_eligible_drugs(drug_summary, min_unique_cell_lines=threshold))
+                for threshold in thresholds
+            ],
+        }
+    )
+    return {
+        "cohort": cohort,
+        "drug_summary": drug_summary,
+        "identity_diagnostics": drug_identity_diagnostics(cohort),
+        "duplicate_diagnostics": response_duplicate_diagnostics(cohort),
+        "coverage_diagnostics": coverage,
+        "eligibility_decision_table": decision_table,
+    }
 
 
 def select_tissue(data: pd.DataFrame, tissue_of_origin: str) -> pd.DataFrame:
@@ -185,7 +382,8 @@ def drug_eligibility(
 
 def analyze_expression_missingness(X: pd.DataFrame) -> dict[str, object]:
     """Return feature and cell-line missingness before any imputation."""
-    return {"gene_missing_fraction": X.isna().mean(), "cell_line_missing_fraction": X.isna().mean(axis=1), "total_missing": int(X.isna().sum().sum()), "all_missing_genes": X.columns[X.isna().all()].tolist(), "empty_cell_lines": X.index[X.isna().all(axis=1)].tolist()}
+    total_values = X.shape[0] * X.shape[1]
+    return {"gene_missing_fraction": X.isna().mean(), "cell_line_missing_fraction": X.isna().mean(axis=1), "total_missing": int(X.isna().sum().sum()), "overall_missing_fraction": float(X.isna().sum().sum() / total_values) if total_values else 0.0, "n_genes": X.shape[1], "n_cell_lines": X.shape[0], "complete_genes": X.columns[X.notna().all()].tolist(), "all_missing_genes": X.columns[X.isna().all()].tolist(), "empty_cell_lines": X.index[X.isna().all(axis=1)].tolist()}
 
 
 def filter_expression_features(X: pd.DataFrame, *, max_gene_missing_fraction: float = 0.2, max_cell_line_missing_fraction: float = 1.0, min_variance: float = 0.0) -> pd.DataFrame:
@@ -199,6 +397,113 @@ def filter_expression_features(X: pd.DataFrame, *, max_gene_missing_fraction: fl
     filtered = X.loc[X.isna().mean(axis=1).le(max_cell_line_missing_fraction)].copy()
     filtered = filtered.loc[:, filtered.isna().mean().le(max_gene_missing_fraction)]
     return filtered.loc[:, filtered.var(skipna=True).gt(min_variance)]
+
+
+def build_expression_dataset(
+    response_cohort: pd.DataFrame,
+    *,
+    response_metric: str,
+    data_dir: str = "data",
+    genes: list[str] | None = None,
+    max_gene_missing_fraction: float = 0.2,
+    max_cell_line_missing_fraction: float = 1.0,
+) -> AnalysisDataset:
+    """Map one resolved response cohort to targeted COSMIC expression features.
+
+    ``genes=None`` means all genes for the *already selected* COSMIC samples,
+    never all response rows. Feature filtering is unsupervised: it never reads
+    ``response_metric``. The returned numeric matrix excludes identifiers and
+    response variables; imputation remains a training-only later operation.
+    """
+    if response_metric not in {"AUC", "LN_IC50"} or response_metric not in response_cohort:
+        raise ValueError(f"Response cohort does not contain supported metric {response_metric!r}")
+    if response_cohort.duplicated("COSMIC_ID").any():
+        raise ValueError("Response cohort must contain one row per COSMIC_ID")
+    if response_cohort[response_metric].isna().any():
+        raise ValueError("Response cohort must exclude missing selected response values")
+    mapping, mapping_info = build_sample_mapping(
+        response_cohort[["COSMIC_ID", "Sample Name"]], data_dir
+    )
+    mapped = response_cohort.merge(mapping, on="COSMIC_ID", how="left", validate="one_to_one")
+    mapped = mapped.loc[mapped["COSMIC_SAMPLE_ID"].notna()].copy()
+    expression = load_expression_features(
+        data_dir,
+        cosmic_sample_ids=mapped["COSMIC_SAMPLE_ID"].tolist(),
+        genes=genes,
+    )
+    wide = expression.pivot(
+        index="COSMIC_SAMPLE_ID", columns="GENE_SYMBOL", values="Z_SCORE"
+    ).reindex(mapped["COSMIC_SAMPLE_ID"])
+    wide.index = mapped.index
+    has_expression = wide.notna().any(axis=1)
+    excluded_no_expression = mapped.loc[~has_expression, "COSMIC_ID"].tolist()
+    wide = wide.loc[has_expression].copy()
+    missingness = analyze_expression_missingness(wide)
+    X = filter_expression_features(
+        wide,
+        max_gene_missing_fraction=max_gene_missing_fraction,
+        max_cell_line_missing_fraction=max_cell_line_missing_fraction,
+    )
+    retained = X.index
+    metadata_columns = [
+        column
+        for column in (
+            "COSMIC_ID", "COSMIC_SAMPLE_ID", "CELL_LINE_NAME", "SANGER_MODEL_ID",
+            "DRUG_ID", "DRUG_NAME", "DATASET", "TISSUE_OF_ORIGIN", "CANCER_TYPE",
+        )
+        if column in mapped
+    ]
+    metadata = mapped.loc[retained, metadata_columns].copy()
+    y = mapped.loc[retained, response_metric].copy().rename("y")
+    if not (len(X) == len(y) == len(metadata)) or not X.index.equals(y.index) or not X.index.equals(metadata.index):
+        raise AssertionError("Expression features, target, and metadata are not aligned")
+    return AnalysisDataset(
+        X=X,
+        y=y,
+        metadata=metadata,
+        diagnostics={
+            "mapping": mapping_info,
+            "n_response_cell_lines": len(response_cohort),
+            "n_mapped_to_cosmic": len(mapped),
+            "n_unmatched": len(response_cohort) - len(mapped),
+            "unmatched_ids": response_cohort.loc[~response_cohort["COSMIC_ID"].isin(mapped["COSMIC_ID"]), "COSMIC_ID"].tolist(),
+            "n_with_expression": int(has_expression.sum()),
+            "excluded_no_expression_ids": excluded_no_expression,
+            "missingness_before_filtering": missingness,
+            "n_genes_after_filtering": X.shape[1],
+            "max_gene_missing_fraction": max_gene_missing_fraction,
+            "max_cell_line_missing_fraction": max_cell_line_missing_fraction,
+        },
+    )
+
+
+def build_initial_experiment_dataset(
+    data: pd.DataFrame,
+    *,
+    data_dir: str = "data",
+    tissue_of_origin: str = "lung_NSCLC",
+    min_unique_cell_lines: int = 75,
+    response_metric: str = "AUC",
+    genes: list[str] | None = None,
+    max_gene_missing_fraction: float = 0.2,
+    max_cell_line_missing_fraction: float = 1.0,
+) -> tuple[AnalysisDataset, dict[str, object]]:
+    """Construct the approved experiment without accessing unrelated samples."""
+    response = build_initial_response_cohort(
+        data,
+        tissue_of_origin=tissue_of_origin,
+        min_unique_cell_lines=min_unique_cell_lines,
+        response_metric=response_metric,
+    )
+    dataset = build_expression_dataset(
+        response["response_cohort"],
+        response_metric=response_metric,
+        data_dir=data_dir,
+        genes=genes,
+        max_gene_missing_fraction=max_gene_missing_fraction,
+        max_cell_line_missing_fraction=max_cell_line_missing_fraction,
+    )
+    return dataset, response
 
 
 def build_drug_dataset(

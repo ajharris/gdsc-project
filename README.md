@@ -85,6 +85,22 @@ coverage without selecting a drug or imposing an eligibility threshold.
 `N_CELL_LINES` is the primary drug-level sample-size statistic; response rows
 can repeat a drug/cell-line pair and are diagnosed, not averaged or discarded.
 
+### Approved initial preprocessing experiment
+
+`filter_eligible_drugs(drug_summary, min_unique_cell_lines=...)` implements a
+configurable eligibility rule based on **unique cell lines**, never raw response
+rows. The approved initial threshold is 75. `select_initial_drug` then selects
+the eligible compound with the greatest cell-line coverage, breaking an exact
+tie by its lowest `DRUG_ID`; this is a reproducible availability rule, not a
+claim of biological superiority.
+
+For this experiment, AUC is the target (with `LN_IC50` retained for later
+sensitivity analysis). `select_response_dataset` chooses the single GDSC
+screen with the greatest number of usable cell lines for the chosen drug; GDSC1
+wins only an exact tie. Measurements from GDSC1 and GDSC2 are not averaged. A
+remaining duplicate `DRUG_ID × COSMIC_ID` pair *within* the chosen screen is a
+hard error, so the final response cohort always has one response per cell line.
+
 ## COSMIC expression feature store
 
 COSMIC v104 Cell Lines Project expression is cached separately as long-format
@@ -94,6 +110,21 @@ GDSC response table. Configure either a user-specific signed `COSMIC_LINK` or
 cache once with `build_expression_cache("data")`.
 Use `load_expression_features("data", cosmic_sample_ids=[...], genes=[...])`
 to retrieve only the features required by a later preprocessing step.
+
+### File roles: source text, temporary SQLite, and Parquet
+
+`data/raw/` holds the downloaded, source-format files: GDSC response CSVs,
+the GDSC metadata workbook, and COSMIC compressed TSV files. They are inputs
+and are not rewritten by preprocessing. While `build_expression_cache` reads
+the large COSMIC TSV in chunks, it uses a temporary SQLite database in the
+system temporary directory solely to accumulate duplicate sample/gene Z-scores
+without holding the full source in memory. This transient database is deleted
+after the cache build; it is neither an analytical dataset nor a project
+artifact. The durable output is the de-duplicated *long-format* Parquet file in
+`data/processed/`. Parquet supports efficient predicate queries for the selected
+COSMIC sample IDs (and, optionally, genes). Only after the response cohort is
+fixed does preprocessing pivot that bounded query into a cell-line-by-gene
+matrix; it never writes or creates a full response-row-by-gene table.
 
 ### Why expression is queried rather than globally joined
 

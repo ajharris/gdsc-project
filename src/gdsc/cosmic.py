@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import tarfile
+import tempfile
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -101,8 +102,13 @@ def build_expression_cache(data_dir="data", *, rebuild=False, chunksize=250_000)
     if not source.exists():
         download_cosmic_expression(raw)
     processed.mkdir(parents=True, exist_ok=True)
-    database = processed / ".cosmic_build.sqlite"
-    database.unlink(missing_ok=True)
+    # Keep the transient SQLite aggregation outside the feature-store directory.
+    # Some mounted project volumes permit Parquet output but do not support
+    # SQLite's journal/locking semantics, which otherwise raises a disk-I/O or
+    # readonly-database error during this memory-safe chunked build.
+    descriptor, database_name = tempfile.mkstemp(prefix="gdsc-cosmic-", suffix=".sqlite")
+    os.close(descriptor)
+    database = Path(database_name)
     connection = sqlite3.connect(database)
     try:
         connection.execute("CREATE TABLE expression (sample_id TEXT, sample_name TEXT, gene TEXT, total REAL, count INTEGER, PRIMARY KEY(sample_id, gene))")
