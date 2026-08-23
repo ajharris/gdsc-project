@@ -3,6 +3,29 @@
 This project studies prediction of single-agent anticancer drug response from
 genomic features, with performance compared across cancer/tissue types.
 
+## Analysis notebooks
+
+Read the notebooks in this order:
+
+1. [`notebooks/01_main_analysis.ipynb`](notebooks/01_main_analysis.ipynb) is
+   the end-to-end primary computational experiment: ingestion, preprocessing,
+   model development, locked held-out evaluation, and feature interpretation.
+2. [`notebooks/02_biological_context.ipynb`](notebooks/02_biological_context.ipynb)
+   is the separate, targeted literature-review framework for contextualizing
+   locked model features. It loads saved interpretation outputs and does not
+   rerun or alter the computational experiment.
+3. [`notebooks/03_sensitivity_ln_ic50.ipynb`](notebooks/03_sensitivity_ln_ic50.ipynb)
+   is an unexecuted scaffold for the future LN_IC50 response-metric sensitivity
+   analysis. The AUC experiment remains frozen.
+
+The former long-form notebook, `notebook/gdsc_drug_response.ipynb`, is retained
+unchanged as a historical reference while the split notebooks are adopted.
+
+The biological-context notebook reads two small, versioned derived results:
+`data/processed/locked_ridge_feature_interpretation_top20.csv` and
+`data/processed/locked_ridge_top20_correlations.csv`. They preserve the locked
+top-20 displays without rerunning model selection or the held-out evaluation.
+
 ## Data source
 
 The data layer uses the official Wellcome Sanger Institute CancerRxGene FTP

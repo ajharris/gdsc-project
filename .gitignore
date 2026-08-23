@@ -220,5 +220,7 @@ __marimo__/
 # Data files
 **/data/processed/*
 !**/data/processed/.gitkeep
+!**/data/processed/locked_ridge_feature_interpretation_top20.csv
+!**/data/processed/locked_ridge_top20_correlations.csv
 **/data/raw/*
 !**/data/raw/.gitkeep
