@@ -1,299 +1,90 @@
-# GDSC drug-response project
+# Predicting drug response with GDSC and COSMIC
 
-This project studies prediction of single-agent anticancer drug response from
-genomic features, with performance compared across cancer/tissue types.
+Can gene expression help predict how cancer cell lines respond to a drug?
+This project combines **GDSC drug-response measurements** with **COSMIC gene
+expression**, builds predictive models for a selected drug and tissue, and
+examines the genes associated with their predictions.
 
-## Analysis notebooks
+The first experiment studies **Erlotinib in non-small-cell lung cancer
+(`lung_NSCLC`)**, using AUC as the response measure. It follows the analysis
+from data preparation through evaluation on held-out cell lines. The broader
+aim is to repeat this workflow across drugs and tissues. Gene associations
+are starting points for biological investigation, not evidence of causation.
 
-Read the notebooks in this order:
+## Read the project from start to finish
 
-1. [`notebooks/01_main_analysis.ipynb`](notebooks/01_main_analysis.ipynb) is
-   the end-to-end primary computational experiment: ingestion, preprocessing,
-   model development, locked held-out evaluation, and feature interpretation.
-2. [`notebooks/02_biological_context.ipynb`](notebooks/02_biological_context.ipynb)
-   is the separate, targeted literature-review framework for contextualizing
-   locked model features. It loads saved interpretation outputs and does not
-   rerun or alter the computational experiment.
-3. [`notebooks/03_sensitivity_ln_ic50.ipynb`](notebooks/03_sensitivity_ln_ic50.ipynb)
-   is an unexecuted scaffold for the future LN_IC50 response-metric sensitivity
-   analysis. The AUC experiment remains frozen.
+1. **[Main analysis](notebooks/01_main_analysis.ipynb) — how the experiment works.**
+   Start here for the research question, data sources, and cohort selection.
+   Follow the notebook through matching cell lines to expression, separating
+   training/validation/test data, comparing models, evaluating the final model,
+   and interpreting its gene coefficients. This is the primary computational
+   experiment and contains the recorded AUC results.
 
-The former long-form notebook, `notebook/gdsc_drug_response.ipynb`, is retained
-unchanged as a historical reference while the split notebooks are adopted.
+2. **[Biological context](notebooks/02_biological_context.ipynb) — what the findings might mean.**
+   Read the saved feature rankings alongside a framework for reviewing evidence
+   about Erlotinib, its pathways, and lung cancer. This notebook explains how to
+   separate model findings from biological hypotheses. The literature review
+   is a scaffold awaiting verified evidence; it does not retrain the model.
 
-The biological-context notebook reads two small, versioned derived results:
-`data/processed/locked_ridge_feature_interpretation_top20.csv` and
-`data/processed/locked_ridge_top20_correlations.csv`. They preserve the locked
-top-20 displays without rerunning model selection or the held-out evaluation.
+3. **[Response-metric sensitivity](notebooks/03_sensitivity_ln_ic50.ipynb) — what to investigate next.**
+   This planned analysis asks whether conclusions change when drug response is
+   measured with LN_IC50 instead of AUC. It is an unimplemented scaffold, with
+   no sensitivity-analysis results yet.
 
-## Data source
+The [original combined notebook](notebook/gdsc_drug_response.ipynb) is kept as
+historical reference. Use the three notebooks above as the reading path.
 
-The data layer uses the official Wellcome Sanger Institute CancerRxGene FTP
-release **GDSC 8.4**, dated 24 July 2022:
+## Run the notebooks
 
-`https://ftp.sanger.ac.uk/pub/project/cancerrxgene/releases/release-8.4/`
+Use **Python 3.12 or later**. From the repository root, create and activate an
+environment, then install the project and notebook kernel:
 
-It downloads the complete defined single-agent release components:
-
-- `GDSC1_fitted_dose_response_24Jul22.csv`
-- `GDSC2_fitted_dose_response_24Jul22.csv`
-- `Cell_Lines_Details.xlsx`
-
-The response files provide `AUC` and `LN_IC50`, along with drug, cell-line,
-and COSMIC identifiers. The metadata workbook provides tissue descriptors and
-TCGA-matched cancer type. Raw files are preserved under `data/raw/` and are
-ignored by Git. A manifest records the release and source files.
-
-The release workbook records availability flags for WES, CNA, gene expression,
-and methylation. The project has not yet selected a genomic feature matrix;
-that matching decision is intentionally deferred to the research-design stage.
-
-## Data API
-
-Install the workspace package from the repository root with
-`python -m pip install -e .`. Restart the notebook kernel after reinstalling
-so it imports this checkout rather than an older copy under `venv/src`.
-
-```python
-from gdsc.data import download_gdsc, filter_by_tissue, load_gdsc, validate_gdsc
-
-download_gdsc("../data/raw")
-validate_gdsc("../data/raw")
-gdsc = load_gdsc("../data/raw")
-pancreas = filter_by_tissue(gdsc, "pancreas")
+```bash
+python3 -m venv venv
+source venv/bin/activate
+python -m pip install -e . ipykernel
 ```
 
-`download_gdsc` downloads the complete release and skips files already present.
-`load_gdsc` combines GDSC1 and GDSC2 and joins cell-line metadata by
-`COSMIC_ID`. Tissue is metadata, not a download parameter. `validate_gdsc`
-performs offline structural checks. `prepare_gdsc` is a convenience wrapper
-for download, validation, and loading.
+Open the main analysis notebook in your notebook editor, select this environment
+as the kernel, and run the cells in order. It downloads missing GDSC 8.4 files
+and builds or reuses the COSMIC v104 expression cache. For a fresh COSMIC download,
+set `COSMIC_AUTHORIZATION` or a signed `COSMIC_LINK` in your local `.env`; see
+[the configuration example](.env.example). Keep credentials out of version control.
+The initial expression-cache build can take time; later runs reuse it.
 
+## Create your own experiment
 
-## Preprocessing
+Once the GDSC files are cached, launch the local selection form from the activated
+environment:
 
-The checked-in raw data contain response records and cell-line assay
-availability flags, but no genomic feature matrix. A genomic source and
-modality (WES, CNA, expression, or methylation) must be selected and supplied
-before an analytical dataset can be created; the preprocessing module does not
-silently substitute one.
+```bash
+python scripts/experiment_form.py
+```
 
-`X` contains numeric genomic features only. `y` is the requested response
-metric and `metadata` separately preserves identifiers, tissue, cancer type,
-and drug fields. The returned `info` dictionary records join counts, feature
-filtering, and thresholds. By default features with more than 20% missingness
-and constant features are removed; remaining missing values are preserved.
-This avoids a global imputation fit. If later modelling requires imputation or
-scaling, call `build_training_transformer(...)`, fit it on training features
-only, and use that fitted transformer to transform held-out data.
+Open **http://127.0.0.1:8765**, choose a drug and tissue from the searchable lists,
+and click **Create notebook**. Open the new file in
+[`notebooks/experiments/`](notebooks/experiments/) and run it with the project
+kernel. The form generates an unexecuted analysis template; it does not run
+models. Existing notebooks are preserved. Stop the form with Ctrl+C.
 
-### Drug-specific preprocessing and leakage control
-
-The modelling observation unit is **one cell line for one selected drug**.
-`build_drug_dataset` first selects a tissue, applies explicit per-drug
-observation/cell-line eligibility thresholds, maps only the remaining cell
-lines to COSMIC, and requests only specified genes. It returns expression-only
-`X`, the explicitly selected `AUC` or `LN_IC50` target `y`, and separate
-metadata. Missingness and variance helpers expose filtering choices rather
-than silently dropping values.
-
-`split_by_cell_line` uses grouped splitting on `COSMIC_ID`, so a cell line can
-never occur in more than one train/validation/test split. `build_preprocessor`
-returns an unfitted imputer/variance-filter/optional-scaler pipeline; fit it on
-the training split only before transforming validation or test data.
-
-### Initial NSCLC coverage analysis
-
-The first cohort is `lung_NSCLC`, selected because it has the largest observed
-number of GDSC cell lines (108). This is a documented initial analysis choice,
-not a hard-coded restriction. `summarize_tissues`, `summarize_drugs`,
-`response_duplicate_diagnostics`, and `drug_coverage_distribution` describe
-coverage without selecting a drug or imposing an eligibility threshold.
-`N_CELL_LINES` is the primary drug-level sample-size statistic; response rows
-can repeat a drug/cell-line pair and are diagnosed, not averaged or discarded.
-
-### Approved initial preprocessing experiment
-
-`filter_eligible_drugs(drug_summary, min_unique_cell_lines=...)` implements a
-configurable eligibility rule based on **unique cell lines**, never raw response
-rows. The approved initial threshold is 75. `select_initial_drug` then selects
-the eligible compound with the greatest cell-line coverage, breaking an exact
-tie by its lowest `DRUG_ID`; this is a reproducible availability rule, not a
-claim of biological superiority.
-
-For this experiment, AUC is the target (with `LN_IC50` retained for later
-sensitivity analysis). `select_response_dataset` chooses the single GDSC
-screen with the greatest number of usable cell lines for the chosen drug; GDSC1
-wins only an exact tie. Measurements from GDSC1 and GDSC2 are not averaged. A
-remaining duplicate `DRUG_ID × COSMIC_ID` pair *within* the chosen screen is a
-hard error, so the final response cohort always has one response per cell line.
-
-### Verified preprocessing handoff
-
-The approved initial experiment resolves to **Erlotinib** from **GDSC2** using
-**AUC**: the GDSC2-specific stable identifier is `DRUG_ID=1168`. Its response
-cohort contains 108 unique lung_NSCLC cell lines, with no missing AUC values or
-within-screen duplicate drug/cell-line pairs. Targeted COSMIC mapping retains
-106 cell lines with expression. The real, target-independent filtered matrix
-has 16,980 expression features. The reproducible grouped split (`random_state`
-42; 20% validation and 20% test) produces 63 training, 21 validation, and 22
-test cell lines.
-
-The training partition alone fits median imputation and the variance filter;
-validation and test are transformed using those learned training statistics.
-Scaling is disabled because COSMIC expression values are already Z-scores. The
-notebook creates `X_train`, `X_val`, `X_test`, their aligned targets and
-metadata, and the fitted preprocessing pipeline. It intentionally stops before
-any predictive model is fit.
-
-## Baseline modeling
-
-The baseline stage compares three fixed, validation-only models: a mean-response
-`DummyRegressor`, Ridge (`alpha=1.0`), and Elastic Net (`alpha=1.0`,
-`l1_ratio=0.5`). Model construction lives in `gdsc.models`; MAE, RMSE, Pearson,
-Spearman, and R² evaluation lives in `gdsc.evaluation`. Undefined correlations
-from constant predictions are explicitly reported as `NaN`.
-
-For the first experiment, the 63 training cell lines and 16,980 features give a
-feature-to-sample ratio of about 270:1, motivating regularized linear models.
-The 21-cell-line validation comparison found Ridge improved on the mean
-baseline (MAE 0.066239 vs. 0.068166; RMSE 0.081292 vs. 0.088695; Pearson
-0.445491). Fixed Elastic Net matched the mean baseline in this initial run.
-These are development diagnostics, not biological conclusions or final model
-selection. The 22-cell-line test partition remains untouched.
-
-### Final locked-model held-out evaluation
-
-Before opening the test set, the strategy was locked as Ridge with
-`alpha=100.0`: it had the best validation RMSE (0.081280) and the lowest
-three-fold training-CV RMSE variability (0.102637 ± 0.010035). The final rule
-was to fit the already configured model on the 63-cell-line training partition
-only, using the already-fitted training-only median imputer and variance filter.
-No hyperparameter search, feature change, preprocessing refit, or model-family
-change is permitted after this point.
-
-The one-time held-out evaluation on 22 cell lines yielded MAE/RMSE of
-0.050805/0.060515 for locked Ridge, versus 0.054069/0.061048 for the
-training-mean baseline. Ridge Pearson and Spearman correlations were 0.354313
-and 0.247883 (the constant baseline correlations are undefined and reported as
-`NaN`). These are the primary generalization results for this initial
-experiment; they represent a modest error improvement, not biological evidence.
-
-## COSMIC expression feature store
-
-COSMIC v104 Cell Lines Project expression is cached separately as long-format
-`data/processed/cosmic_expression.parquet`. It is never merged onto the full
-GDSC response table. Configure either a user-specific signed `COSMIC_LINK` or
-`COSMIC_AUTHORIZATION` locally in `.env` (never commit either), then build the
-cache once with `build_expression_cache("data")`.
-Use `load_expression_features("data", cosmic_sample_ids=[...], genes=[...])`
-to retrieve only the features required by a later preprocessing step.
-
-### File roles: source text, temporary SQLite, and Parquet
-
-`data/raw/` holds the downloaded, source-format files: GDSC response CSVs,
-the GDSC metadata workbook, and COSMIC compressed TSV files. It may also
-contain the pre-existing legacy wide COSMIC Parquet matrix generated during
-earlier project work. The loader recognizes that file in its actual raw-data
-location and reads only requested samples/genes, converting the bounded result
-to the common long-format API. New cache builds write the preferred long-format
-Parquet store under `data/processed/`. While `build_expression_cache` reads
-the large COSMIC TSV in chunks, it uses a temporary SQLite database in the
-system temporary directory solely to accumulate duplicate sample/gene Z-scores
-without holding the full source in memory. This transient database is deleted
-after the cache build; it is neither an analytical dataset nor a project
-artifact. The durable output is the de-duplicated *long-format* Parquet file in
-`data/processed/`. Parquet supports efficient predicate queries for the selected
-COSMIC sample IDs (and, optionally, genes). Only after the response cohort is
-fixed does preprocessing pivot that bounded query into a cell-line-by-gene
-matrix; it never writes or creates a full response-row-by-gene table.
-
-### Why expression is queried rather than globally joined
-
-An earlier ingestion attempt merged the complete COSMIC expression matrix
-(about 17,000 genes) onto every GDSC drug-response observation (about 575,000
-rows). This would create a dense response-row-by-gene table and failed with a
-memory allocation request of roughly 72.8 GiB.
-
-The replacement is a feature-store design: GDSC responses and metadata remain
-lightweight; COSMIC expression is de-duplicated in long format using the
-documented arithmetic mean for repeated sample/gene Z-scores and cached once in
-`data/processed/cosmic_expression.parquet`. Later preprocessing first selects
-the relevant cohort, cell lines, and genes, then queries only those rows using
-`load_expression_features`. The final modelling-table merge is therefore small,
-explicit, and performed only after feature restrictions have been chosen.
-
-## Feature interpretation
-
-The locked Ridge model (`alpha=100.0`) is interpreted by absolute signed
-coefficients on the unchanged COSMIC Z-score feature set. Coefficients indicate
-conditional predictive association with predicted AUC, not biological causation
-or a sensitivity/resistance mechanism. Training-only bootstrap refits report
-coefficient variation and sign consistency without tuning, changing features,
-or using test responses.
-
-Top-20 feature correlations are computed from training expression only and
-reported numerically without removing any genes. Correlation matters because
-Ridge can distribute predictive weight across correlated expression features;
-therefore a large individual coefficient need not mean that one gene alone is
-responsible for a prediction.
-
-## Generate a drug/tissue experiment
-
-From the repository root, using the project Python environment:
+For command-line generation, use
+[`generate_experiment.py`](scripts/generate_experiment.py):
 
 ```bash
 python scripts/generate_experiment.py "Predict Erlotinib response in lung NSCLC"
 ```
 
-This creates `notebooks/experiments/erlotinib_lung_nsclc_auc.ipynb`. Repeated
-requests receive numbered filenames, preserving existing notebooks and outputs.
-Open the generated notebook with the project kernel and run its cells in order.
+Both tools support AUC or LN_IC50 experiments. Run either script with `--help`
+for its options. New experiments have their own results and should be read
+separately from the recorded primary analysis.
 
-The generator matches drug and tissue names against cached GDSC response CSVs
-and cell-line metadata. Matching ignores case and accepts spaces in place of
-underscores or hyphens. It runs locally without an LLM or API key. The prompt
-selects the drug and tissue and is recorded in the notebook; other prose does
-not modify the experiment template. Missing or ambiguous matches produce an
-error with instructions rather than guessing. List supported names with:
+## Where the implementation lives
 
-```bash
-python scripts/generate_experiment.py --list-options
-```
-
-Explicit names override prompt matching. Configure the response metric and
-minimum expression-matched cohort size with flags (defaults: AUC and 20):
-
-```bash
-python scripts/generate_experiment.py "Test a pancreatic cancer hypothesis" \
-  --drug Gemcitabine --tissue pancreas --metric LN_IC50 --min-cell-lines 20
-```
-
-Generation requires cached GDSC files (`download_gdsc` prepares them) but does
-not download data, load expression, or train models. Each notebook contains
-editable configuration, response-screen selection, targeted COSMIC expression
-loading, grouped train/validation/test splits, validation-only Ridge alpha
-selection, a mean baseline, held-out evaluation, and coefficient interpretation.
-It contains no results from prior experiments. The minimum cohort size is an
-execution guard, not a power calculation. Running it may download missing
-COSMIC data using local `.env` credentials. Fix the design before evaluating
-the test partition and record subsequent changes as a separate experiment.
-
-### Choose options in a local web form
-
-To select names from searchable lists instead of writing a prompt, run:
-
-```bash
-venv/bin/python scripts/experiment_form.py
-```
-
-Open **http://127.0.0.1:8765** in your browser. Filter and select a tissue and
-drug, choose AUC or LN_IC50, optionally add research notes, and click **Create
-notebook**. The form displays the saved path under `notebooks/experiments`.
-Open that notebook in your editor to execute it. Notes are recorded as context;
-they do not alter the analysis template. Lists contain all cached names;
-the notebook checks whether the selected drug/tissue pair has sufficient coverage.
-
-The form uses the existing environment with no extra dependencies. It is served
-only on your computer and stops with Ctrl+C. Use `--port 8766` if port 8765 is
-already occupied. Cached GDSC files are required, as with the command-line generator.
+The notebooks explain the analysis; [`src/gdsc/`](src/gdsc/) contains its reusable
+Python functions. Follow [data loading](src/gdsc/data.py) and
+[expression caching](src/gdsc/cosmic.py) into
+[preprocessing](src/gdsc/preprocessing.py), [models](src/gdsc/models.py),
+[evaluation](src/gdsc/evaluation.py), and
+[feature interpretation](src/gdsc/interpretation.py).
+Raw downloads live in `data/raw/`; expression caches and derived results live
+in `data/processed/`. Most data files are excluded from version control.
