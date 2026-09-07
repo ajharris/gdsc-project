@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
 import tarfile
 import tempfile
 from pathlib import Path
@@ -17,7 +18,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 import pandas as pd
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # Resolve configuration from the project, not the caller's working directory;
@@ -35,6 +36,20 @@ EXPRESSION_REQUIRED_COLUMNS = set(EXPRESSION_COLUMNS) | {"COSMIC_GENE_ID", "REGU
 
 def _cosmic_request() -> Request:
     """Build an authenticated request without logging credentials."""
+    # A notebook may import this module before the user uploads their .env.
+    # Retry configuration at download time, preserving nonempty runtime values.
+    keys = ("COSMIC_AUTHORIZATION", "COSMIC_LINK")
+    if not any(os.environ.get(key, "").strip() for key in keys):
+        candidates = [PROJECT_ROOT / ".env", Path.cwd() / ".env"]
+        if "google.colab" in sys.modules:
+            candidates.append(Path("/content/.env"))
+        for path in dict.fromkeys(candidates):
+            if path.is_file():
+                for key, value in dotenv_values(path, encoding="utf-8-sig").items():
+                    if key in keys and value and not os.environ.get(key, "").strip():
+                        os.environ[key] = value.strip()
+            if any(os.environ.get(key, "").strip() for key in keys):
+                break
     link = os.environ.get("COSMIC_LINK", "").strip() or COSMIC_EXPRESSION_URL
     authorization = os.environ.get("COSMIC_AUTHORIZATION", "").strip()
     if link == COSMIC_EXPRESSION_URL and not authorization:

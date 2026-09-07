@@ -225,3 +225,26 @@ def test_empty_signed_link_falls_back_to_endpoint(monkeypatch):
     monkeypatch.setenv('COSMIC_LINK', ' ')
     monkeypatch.setenv('COSMIC_AUTHORIZATION', 'test-token')
     assert cosmic._cosmic_request().full_url == cosmic.COSMIC_EXPRESSION_URL
+
+
+@pytest.mark.parametrize("location", ["project", "working_directory"])
+def test_request_loads_env_added_after_import(tmp_path, monkeypatch, location):
+    project = tmp_path / "project"
+    working = tmp_path / "notebooks"
+    project.mkdir()
+    working.mkdir()
+    monkeypatch.setattr(cosmic, "PROJECT_ROOT", project)
+    monkeypatch.chdir(working)
+    monkeypatch.setenv("COSMIC_AUTHORIZATION", " ")
+    monkeypatch.setenv("COSMIC_LINK", "")
+    directory = project if location == "project" else working
+    (directory / ".env").write_text('\ufeffCOSMIC_AUTHORIZATION=late-test-token\n')
+    assert cosmic._cosmic_request().get_header("Authorization") == "Basic late-test-token"
+
+
+def test_request_preserves_existing_runtime_credentials(tmp_path, monkeypatch):
+    monkeypatch.setattr(cosmic, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setenv("COSMIC_AUTHORIZATION", "runtime-test-token")
+    monkeypatch.setenv("COSMIC_LINK", "")
+    (tmp_path / ".env").write_text('COSMIC_AUTHORIZATION=file-test-token\n')
+    assert cosmic._cosmic_request().get_header("Authorization") == "Basic runtime-test-token"
