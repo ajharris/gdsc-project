@@ -237,3 +237,63 @@ reported numerically without removing any genes. Correlation matters because
 Ridge can distribute predictive weight across correlated expression features;
 therefore a large individual coefficient need not mean that one gene alone is
 responsible for a prediction.
+
+## Generate a drug/tissue experiment
+
+From the repository root, using the project Python environment:
+
+```bash
+python scripts/generate_experiment.py "Predict Erlotinib response in lung NSCLC"
+```
+
+This creates `notebooks/experiments/erlotinib_lung_nsclc_auc.ipynb`. Repeated
+requests receive numbered filenames, preserving existing notebooks and outputs.
+Open the generated notebook with the project kernel and run its cells in order.
+
+The generator matches drug and tissue names against cached GDSC response CSVs
+and cell-line metadata. Matching ignores case and accepts spaces in place of
+underscores or hyphens. It runs locally without an LLM or API key. The prompt
+selects the drug and tissue and is recorded in the notebook; other prose does
+not modify the experiment template. Missing or ambiguous matches produce an
+error with instructions rather than guessing. List supported names with:
+
+```bash
+python scripts/generate_experiment.py --list-options
+```
+
+Explicit names override prompt matching. Configure the response metric and
+minimum expression-matched cohort size with flags (defaults: AUC and 20):
+
+```bash
+python scripts/generate_experiment.py "Test a pancreatic cancer hypothesis" \
+  --drug Gemcitabine --tissue pancreas --metric LN_IC50 --min-cell-lines 20
+```
+
+Generation requires cached GDSC files (`download_gdsc` prepares them) but does
+not download data, load expression, or train models. Each notebook contains
+editable configuration, response-screen selection, targeted COSMIC expression
+loading, grouped train/validation/test splits, validation-only Ridge alpha
+selection, a mean baseline, held-out evaluation, and coefficient interpretation.
+It contains no results from prior experiments. The minimum cohort size is an
+execution guard, not a power calculation. Running it may download missing
+COSMIC data using local `.env` credentials. Fix the design before evaluating
+the test partition and record subsequent changes as a separate experiment.
+
+### Choose options in a local web form
+
+To select names from searchable lists instead of writing a prompt, run:
+
+```bash
+venv/bin/python scripts/experiment_form.py
+```
+
+Open **http://127.0.0.1:8765** in your browser. Filter and select a tissue and
+drug, choose AUC or LN_IC50, optionally add research notes, and click **Create
+notebook**. The form displays the saved path under `notebooks/experiments`.
+Open that notebook in your editor to execute it. Notes are recorded as context;
+they do not alter the analysis template. Lists contain all cached names;
+the notebook checks whether the selected drug/tissue pair has sufficient coverage.
+
+The form uses the existing environment with no extra dependencies. It is served
+only on your computer and stops with Ctrl+C. Use `--port 8766` if port 8765 is
+already occupied. Cached GDSC files are required, as with the command-line generator.
