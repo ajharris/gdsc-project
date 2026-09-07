@@ -6,12 +6,14 @@ module never attaches all expression features to all GDSC response rows.
 """
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import tarfile
 import tempfile
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 import pandas as pd
@@ -41,9 +43,34 @@ def _cosmic_request() -> Request:
 
 
 def _download_file(request: Request | str, destination: Path) -> None:
-    with urlopen(request) as response, destination.open("wb") as output:
-        while chunk := response.read(1024 * 1024):
-            output.write(chunk)
+    # The scripted endpoint returns JSON with a signed URL, not archive bytes.
+    # Keep partial downloads out of the reusable cache.
+    descriptor, name = tempfile.mkstemp(dir=destination.parent, suffix=".part")
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            for attempt in range(2):
+                with urlopen(request) as response:
+                    first = response.read(1024 * 1024)
+                    if first.lstrip().startswith(b"{"):
+                        try:
+                            link = json.loads(first).get("url")
+                        except (ValueError, AttributeError):
+                            link = None
+                        if attempt or not isinstance(link, str) or urlparse(link).scheme != "https":
+                            raise RuntimeError("COSMIC returned invalid download metadata; check COSMIC_LINK and COSMIC_AUTHORIZATION.")
+                        # Do not forward Basic credentials to the signed URL host.
+                        request = link
+                        continue
+                    output.write(first)
+                    while chunk := response.read(1024 * 1024):
+                        output.write(chunk)
+                    break
+        if not tarfile.is_tarfile(temporary):
+            raise RuntimeError("COSMIC did not return a readable tar archive; check COSMIC_LINK and COSMIC_AUTHORIZATION.")
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _extract_member(archive_path: Path, output_dir: Path, filename: str) -> Path:
@@ -60,9 +87,15 @@ def _extract_member(archive_path: Path, output_dir: Path, filename: str) -> Path
         source = archive.extractfile(member)
         if source is None:
             raise ValueError(f"Cannot read COSMIC archive member: {member.name}")
-        with source, destination.open("wb") as output:
-            while chunk := source.read(1024 * 1024):
-                output.write(chunk)
+        descriptor, name = tempfile.mkstemp(dir=output_dir, suffix=".part")
+        temporary = Path(name)
+        try:
+            with source, os.fdopen(descriptor, "wb") as output:
+                while chunk := source.read(1024 * 1024):
+                    output.write(chunk)
+            temporary.replace(destination)
+        finally:
+            temporary.unlink(missing_ok=True)
     return destination
 
 
@@ -71,7 +104,10 @@ def download_cosmic_expression(data_dir="data/raw") -> dict[str, Path]:
     raw_dir = Path(data_dir)
     raw_dir.mkdir(parents=True, exist_ok=True)
     archive = raw_dir / COSMIC_EXPRESSION_ARCHIVE
-    if not archive.exists():
+    expression = raw_dir / COSMIC_EXPRESSION_FILE
+    if expression.exists():
+        return {"archive": archive, "expression": expression}
+    if not archive.exists() or not tarfile.is_tarfile(archive):
         _download_file(_cosmic_request(), archive)
     return {"archive": archive, "expression": _extract_member(archive, raw_dir, COSMIC_EXPRESSION_FILE)}
 
@@ -223,7 +259,21 @@ def build_sample_mapping(gdsc_metadata: pd.DataFrame, data_dir="data") -> tuple[
     missing = required - set(gdsc_metadata.columns)
     if missing:
         raise ValueError(f"GDSC metadata is missing mapping columns: {sorted(missing)}")
-    samples = pd.read_csv(Path(data_dir) / "raw" / COSMIC_SAMPLE_FILE, sep="\t", compression="gzip", usecols=["COSMIC_SAMPLE_ID", "SAMPLE_NAME"])
+    sample_path = Path(data_dir) / "raw" / COSMIC_SAMPLE_FILE
+    sample_columns = ["COSMIC_SAMPLE_ID", "SAMPLE_NAME"]
+    if sample_path.exists():
+        samples = pd.read_csv(sample_path, sep="\t", compression="gzip", usecols=sample_columns)
+    else:
+        # Expression carries the same sample identifiers. Read only these two
+        # columns in bounded batches when the separate sample file is absent.
+        import pyarrow.parquet as pq
+
+        cache = build_expression_cache(data_dir)
+        sample_batches = (
+            batch.to_pandas().drop_duplicates()
+            for batch in pq.ParquetFile(cache).iter_batches(columns=sample_columns)
+        )
+        samples = pd.concat(sample_batches, ignore_index=True).drop_duplicates()
     samples["SAMPLE_NAME"] = samples["SAMPLE_NAME"].astype("string").str.strip()
     ambiguous = samples.groupby("SAMPLE_NAME")["COSMIC_SAMPLE_ID"].nunique()
     ambiguous = ambiguous[ambiguous > 1].index.tolist()

@@ -84,6 +84,21 @@ def test_schema_rejects_missing_fields():
         cosmic._normalise_expression(pd.DataFrame({"COSMIC_SAMPLE_ID": ["C1"]}))
 
 
+@pytest.mark.parametrize("cache_exists", [False, True])
+def test_mapping_without_sample_file_builds_or_reuses_expression(cosmic_dir, monkeypatch, cache_exists):
+    (cosmic_dir / "raw" / cosmic.COSMIC_SAMPLE_FILE).unlink()
+    if cache_exists:
+        cosmic.build_expression_cache(cosmic_dir)
+        (cosmic_dir / "raw" / cosmic.COSMIC_EXPRESSION_FILE).unlink()
+    monkeypatch.setattr(cosmic, "_download_file", lambda *args: pytest.fail("downloaded"))
+    metadata = pd.DataFrame({"COSMIC_ID": [1, 2, 3], "Sample Name": ["Alpha", "Beta", "Missing"]})
+    mapping, diagnostics = cosmic.build_sample_mapping(metadata, cosmic_dir)
+    assert mapping["COSMIC_SAMPLE_ID"].iloc[:2].tolist() == ["C1", "C2"]
+    assert diagnostics["matched"] == 2
+    assert diagnostics["unmatched_names"] == ["Missing"]
+    assert (cosmic_dir / "processed" / cosmic.COSMIC_EXPRESSION_PARQUET).exists()
+
+
 def test_request_uses_signed_link_without_exposing_credentials(monkeypatch):
     monkeypatch.setenv("COSMIC_LINK", "https://example.test/signed")
     monkeypatch.delenv("COSMIC_AUTHORIZATION", raising=False)
@@ -134,3 +149,57 @@ def test_mapping_rejects_ambiguous_cosmic_sample_name(cosmic_dir):
     )
     with pytest.raises(ValueError, match="multiple IDs"):
         cosmic.build_sample_mapping(pd.DataFrame({"COSMIC_ID": [1], "Sample Name": ["Alpha"]}), cosmic_dir)
+
+
+def _archive_bytes():
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w") as archive:
+        member = tarfile.TarInfo(cosmic.COSMIC_EXPRESSION_FILE)
+        member.size = 7
+        archive.addfile(member, io.BytesIO(b"payload"))
+    return stream.getvalue()
+
+
+def test_download_follows_metadata_and_repairs_cached_json(tmp_path, monkeypatch):
+    archive = tmp_path / cosmic.COSMIC_EXPRESSION_ARCHIVE
+    archive.write_text('{"url": "https://example.test/expired"}')
+    monkeypatch.setenv("COSMIC_LINK", "https://example.test/api")
+    calls = []
+    responses = [b'{"url": "https://example.test/signed"}', _archive_bytes()]
+
+    def open_response(request):
+        calls.append(request)
+        return io.BytesIO(responses.pop(0))
+
+    monkeypatch.setattr(cosmic, "urlopen", open_response)
+    result = cosmic.download_cosmic_expression(tmp_path)
+    assert result["expression"].read_bytes() == b"payload"
+    assert calls[1] == "https://example.test/signed"
+    assert tarfile.is_tarfile(archive)
+    assert not list(tmp_path.glob("*.part"))
+
+
+@pytest.mark.parametrize("payload", [b"<html>Login required</html>", b'{"error": "denied"}', b'{"url": "file:///etc/passwd"}'])
+def test_invalid_download_never_publishes_archive(tmp_path, monkeypatch, payload):
+    monkeypatch.setattr(cosmic, "urlopen", lambda request: io.BytesIO(payload))
+    destination = tmp_path / "expression.tar"
+    with pytest.raises(RuntimeError, match="COSMIC"):
+        cosmic._download_file("https://example.test/api", destination)
+    assert not destination.exists()
+    assert not list(tmp_path.glob("*.part"))
+
+
+def test_interrupted_download_preserves_existing_file(tmp_path, monkeypatch):
+    class Interrupted(io.BytesIO):
+        def read(self, size=-1):
+            if self.tell():
+                raise OSError("connection interrupted")
+            return super().read(size)
+
+    monkeypatch.setattr(cosmic, "urlopen", lambda request: Interrupted(_archive_bytes()))
+    destination = tmp_path / "expression.tar"
+    destination.write_bytes(b"existing")
+    with pytest.raises(OSError, match="interrupted"):
+        cosmic._download_file("https://example.test/archive", destination)
+    assert destination.read_bytes() == b"existing"
+    assert not list(tmp_path.glob("*.part"))

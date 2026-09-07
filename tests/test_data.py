@@ -66,8 +66,11 @@ class DownloadGdscTests(unittest.TestCase):
             for filename in data.SOURCE_FILES.values()
         }
 
-        def fake_urlopen(url):
-            return _Response(responses[url])
+        def fake_urlopen(request):
+            self.assertEqual(
+                request.get_header("User-agent"), "gdsc-project/0.1 (Python urllib)"
+            )
+            return _Response(responses[request.full_url])
 
         with TemporaryDirectory() as directory, patch.object(
             data, "urlopen", side_effect=fake_urlopen

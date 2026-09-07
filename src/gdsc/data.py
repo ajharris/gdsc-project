@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import pandas as pd
 
@@ -44,7 +44,9 @@ def _download_file(
     output_path: Path,
 ) -> None:
     """Download a URL to a local file."""
-    with urlopen(url) as response, output_path.open("wb") as output_file:
+    # Sanger rejects urllib's default User-Agent with HTTP 403.
+    request = Request(url, headers={"User-Agent": "gdsc-project/0.1 (Python urllib)"})
+    with urlopen(request) as response, output_path.open("wb") as output_file:
         while chunk := response.read(1024 * 1024):
             output_file.write(chunk)
 

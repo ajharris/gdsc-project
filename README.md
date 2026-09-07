@@ -50,6 +50,10 @@ that matching decision is intentionally deferred to the research-design stage.
 
 ## Data API
 
+Install the workspace package from the repository root with
+`python -m pip install -e .`. Restart the notebook kernel after reinstalling
+so it imports this checkout rather than an older copy under `venv/src`.
+
 ```python
 from gdsc.data import download_gdsc, filter_by_tissue, load_gdsc, validate_gdsc
 
