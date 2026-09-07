@@ -107,7 +107,8 @@ def test_checked_in_notebooks_load_credentials_before_analysis():
             assert "".join(actual["source"]) == template["source"], path
 
 
-def test_colab_env_upload_loads_values_and_removes_file(monkeypatch, capsys, tmp_path):
+@pytest.mark.parametrize("secret_timeout", [False, True])
+def test_colab_env_upload_loads_values_and_removes_file(monkeypatch, capsys, tmp_path, secret_timeout):
     import os
     import types
     import sys
@@ -122,9 +123,13 @@ def test_colab_env_upload_loads_values_and_removes_file(monkeypatch, capsys, tmp
     colab.files = types.SimpleNamespace(upload_file=upload_file)
     class MissingSecret(Exception):
         pass
+    calls = []
     def missing(key):
+        calls.append(key)
+        if secret_timeout:
+            raise TimeoutError(key)
         raise MissingSecret(key)
-    colab.userdata = types.SimpleNamespace(get=missing, SecretNotFoundError=MissingSecret, NotebookAccessError=MissingSecret)
+    colab.userdata = types.SimpleNamespace(get=missing, SecretNotFoundError=MissingSecret, NotebookAccessError=MissingSecret, TimeoutException=TimeoutError)
     monkeypatch.setitem(sys.modules, 'google.colab', colab)
     monkeypatch.setenv('GDSC_TEST_UPLOAD', 'previous')
     monkeypatch.setenv('COSMIC_AUTHORIZATION', '')
@@ -133,6 +138,8 @@ def test_colab_env_upload_loads_values_and_removes_file(monkeypatch, capsys, tmp
     exec(cell['source'], {'setup_root': tmp_path})
     assert os.environ['GDSC_TEST_UPLOAD'] == 'example-private-value'
     assert not uploads[0].exists()
+    if secret_timeout:
+        assert calls == ["COSMIC_AUTHORIZATION"]
     output = capsys.readouterr().out
     assert 'example-private-value' not in output
     assert 'example-test-token' not in output

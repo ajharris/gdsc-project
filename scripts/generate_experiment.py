@@ -124,6 +124,9 @@ def notebook_setup_cells(notebook_directory="notebooks/experiments") -> list[dic
                     for key in ("COSMIC_AUTHORIZATION", "COSMIC_LINK"):
                         try:
                             value = userdata.get(key)
+                        except userdata.TimeoutException:
+                            print("Colab Secrets unavailable. Place .env in /content/.env when running outside the Colab UI.")
+                            break
                         except (userdata.SecretNotFoundError, userdata.NotebookAccessError):
                             continue
                         if value and value.strip():
