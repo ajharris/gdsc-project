@@ -203,3 +203,25 @@ def test_interrupted_download_preserves_existing_file(tmp_path, monkeypatch):
         cosmic._download_file("https://example.test/archive", destination)
     assert destination.read_bytes() == b"existing"
     assert not list(tmp_path.glob("*.part"))
+
+
+def test_project_env_takes_precedence_over_example(tmp_path):
+    import os
+    import subprocess
+    source = Path(cosmic.__file__).read_text()
+    # Exercise module initialization in a fresh process with isolated test config.
+    defaults = Path(cosmic.PROJECT_ROOT / '.env.example').read_text()
+    (tmp_path / '.env.example').write_text(defaults)
+    (tmp_path / '.env').write_text('COSMIC_AUTHORIZATION=fixture-token\n')
+    source = source.replace('PROJECT_ROOT = Path(__file__).resolve().parents[2]',
+                            f'PROJECT_ROOT = Path({str(tmp_path)!r})')
+    module = tmp_path / 'cosmic_config_test.py'
+    module.write_text(source + '\nassert _cosmic_request().get_header("Authorization") == "Basic fixture-token"\n')
+    environment = {k: v for k, v in os.environ.items() if not k.startswith('COSMIC_')}
+    subprocess.run([sys.executable, str(module)], env=environment, check=True, capture_output=True)
+
+
+def test_empty_signed_link_falls_back_to_endpoint(monkeypatch):
+    monkeypatch.setenv('COSMIC_LINK', ' ')
+    monkeypatch.setenv('COSMIC_AUTHORIZATION', 'test-token')
+    assert cosmic._cosmic_request().full_url == cosmic.COSMIC_EXPRESSION_URL

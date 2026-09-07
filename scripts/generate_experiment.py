@@ -54,8 +54,127 @@ def catalog(raw_dir: Path) -> tuple[list[str], list[str]]:
     return sorted(drugs), sorted(tissues)
 
 
+def notebook_setup_cells(notebook_directory="notebooks/experiments") -> list[dict]:
+    """Bootstrap a repository checkout and install its package in a notebook kernel."""
+    explanation = (
+        "## Runtime setup (Colab or local)\n\n"
+        "Run this cell before the analysis. It reuses a local checkout or clones the "
+        "GitHub repository into Colab, then installs `src/gdsc` and the dependencies "
+        "declared in `pyproject.toml`. Python 3.12 or later is required.\n\n"
+        "The clone contains the published default branch; push your changes before "
+        "opening a fresh Colab runtime. For a private repository, provide an authenticated "
+        "checkout at `/content/gdsc-project` first. Raw data and local `.env` credentials "
+        "are not included. Configure COSMIC access in the runtime before downloading "
+        "expression data. If packages were already imported, restart the runtime after "
+        "installation and rerun this cell.\n"
+    )
+    source = textwrap.dedent("""\
+        import sys
+        import subprocess
+        from pathlib import Path
+
+        setup_env_dir = Path.cwd()
+        if sys.version_info < (3, 12):
+            raise RuntimeError("This project requires Python 3.12 or later; select a compatible runtime.")
+        setup_root = next((p for p in (Path.cwd(), *Path.cwd().parents)
+                           if (p / "src/gdsc/data.py").is_file() and (p / "pyproject.toml").is_file()), None)
+        if setup_root is None:
+            if "google.colab" not in sys.modules:
+                raise RuntimeError("Open this notebook from within the project checkout.")
+            setup_root = Path("/content/gdsc-project")
+            if not setup_root.exists():
+                subprocess.run(["git", "clone", "https://github.com/ajharris/gdsc-project.git", str(setup_root)], check=True)
+            if not (setup_root / "src/gdsc/data.py").is_file():
+                raise RuntimeError("Expected a project checkout at /content/gdsc-project.")
+
+        # Editable installation includes src/gdsc and all declared runtime dependencies.
+        %pip install -e "$setup_root"
+        sys.path.insert(0, str(setup_root / "src"))
+    """)
+    source += f"setup_notebook_dir = setup_root / {notebook_directory!r}\n"
+    source += "setup_notebook_dir.mkdir(parents=True, exist_ok=True)\n%cd $setup_notebook_dir\n"
+    env_source = textwrap.dedent("""\
+        # Run before analysis; rerunning also refreshes imported COSMIC configuration.
+        import sys
+        import os
+        import importlib
+        import tempfile
+        from pathlib import Path
+        from dotenv import load_dotenv
+
+        def load_runtime_environment():
+            def credentials_present():
+                return any(os.environ.get(key, "").strip()
+                           for key in ("COSMIC_AUTHORIZATION", "COSMIC_LINK"))
+
+            # Local config takes precedence over defaults; existing runtime values
+            # and accessible Colab Secrets also work without an upload prompt.
+            env_candidates = [setup_root / ".env",
+                              globals().get("setup_env_dir", setup_root) / ".env"]
+            if "google.colab" in sys.modules:
+                env_candidates.append(Path("/content/.env"))
+            for env_path in dict.fromkeys(env_candidates):
+                if env_path.is_file():
+                    load_dotenv(env_path, override=True, encoding="utf-8-sig")
+                    if credentials_present():
+                        break
+            if "google.colab" in sys.modules:
+                from google.colab import files, userdata
+                if not credentials_present():
+                    for key in ("COSMIC_AUTHORIZATION", "COSMIC_LINK"):
+                        try:
+                            value = userdata.get(key)
+                        except (userdata.SecretNotFoundError, userdata.NotebookAccessError):
+                            continue
+                        if value and value.strip():
+                            os.environ[key] = value.strip()
+                            break
+                if not credentials_present():
+                    print("No credentials available. Select your .env once to continue Run all.")
+                    with tempfile.TemporaryDirectory(prefix="gdsc-env-") as directory:
+                        env_path = Path(directory) / ".env"
+                        files.upload_file(str(env_path))
+                        load_dotenv(env_path, override=True, encoding="utf-8-sig")
+            load_dotenv(setup_root / ".env.example", encoding="utf-8-sig")
+            authorization_present = bool(os.environ.get("COSMIC_AUTHORIZATION", "").strip())
+            link_present = bool(os.environ.get("COSMIC_LINK", "").strip())
+            print("COSMIC_AUTHORIZATION:", "set" if authorization_present else "missing or empty")
+            print("COSMIC_LINK:", "set" if link_present else "missing or empty")
+            if not (authorization_present or link_present):
+                raise RuntimeError("No COSMIC credentials loaded. Upload your actual .env, not .env.example; it must contain COSMIC_AUTHORIZATION or COSMIC_LINK.")
+            # COSMIC keeps file configuration in module constants. Refresh it if this
+            # cell was run after an earlier analysis import in the same runtime.
+            if "gdsc.cosmic" in sys.modules:
+                importlib.reload(sys.modules["gdsc.cosmic"])
+                print("Refreshed imported COSMIC configuration. Rerun subsequent analysis cells.")
+            print("Environment loaded. Variable values are not displayed.")
+
+        load_runtime_environment()
+    """)
+    return [
+        {"cell_type": "markdown", "id": "runtime-setup-intro", "metadata": {}, "source": explanation},
+        {"cell_type": "code", "id": "runtime-setup", "metadata": {"tags": ["runtime-setup"]},
+         "source": source, "execution_count": None, "outputs": []},
+        {"cell_type": "markdown", "id": "runtime-env-intro", "metadata": {},
+         "source": "### Run all: configure credentials once\n\n"
+                   "For unattended Colab setup, open **Secrets** (the key icon), add `COSMIC_AUTHORIZATION` "
+                   "with the value from your local `.env`, and enable **Notebook access**. "
+                   "Then choose **Runtime → Run all**. A signed `COSMIC_LINK` secret is also supported, "
+                   "but expires and may need replacement.\n\n"
+                   "For `.env` setup, place your file in the project root or beside the notebook before Run all. "
+                   "In Colab, upload it to `/content/.env` using the Files panel before Run all. "
+                   "Setup reuses that `.env` or runtime credentials, then checks Colab Secrets. "
+                   "If neither is available, Run all pauses at a file picker for your `.env` and continues after upload. "
+                   "Local `.env` files cannot be read automatically from a remote Colab server. "
+                   "Files selected through the setup picker are removed after loading; secrets are never printed. "
+                   "Saved Colab Secrets can be used again after a runtime restart without another upload.\n"},
+        {"cell_type": "code", "id": "runtime-env", "metadata": {"tags": ["runtime-setup"]},
+         "source": env_source, "execution_count": None, "outputs": []},
+    ]
+
+
 def make_notebook(prompt: str, drug: str, tissue: str, metric: str, min_cell_lines: int) -> dict:
-    cells = []
+    cells = notebook_setup_cells()
 
     def add(kind, source):
         cell = {"cell_type": kind, "id": f"cell-{len(cells):02d}", "metadata": {},

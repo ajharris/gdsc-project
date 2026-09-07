@@ -22,8 +22,8 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # Resolve configuration from the project, not the caller's working directory;
 # notebooks execute from ``notebook/`` while command-line use often starts at root.
+load_dotenv(PROJECT_ROOT / ".env", encoding="utf-8-sig")
 load_dotenv(PROJECT_ROOT / ".env.example")
-load_dotenv(PROJECT_ROOT / ".env")
 COSMIC_EXPRESSION_ARCHIVE = os.environ["COSMIC_EXPRESSION_ARCHIVE"]
 COSMIC_EXPRESSION_FILE = os.environ["COSMIC_EXPRESSION_FILE"]
 COSMIC_SAMPLE_FILE = os.environ["COSMIC_SAMPLE_FILE"]
@@ -35,10 +35,17 @@ EXPRESSION_REQUIRED_COLUMNS = set(EXPRESSION_COLUMNS) | {"COSMIC_GENE_ID", "REGU
 
 def _cosmic_request() -> Request:
     """Build an authenticated request without logging credentials."""
-    link = os.environ.get("COSMIC_LINK", COSMIC_EXPRESSION_URL)
-    authorization = os.environ.get("COSMIC_AUTHORIZATION")
+    link = os.environ.get("COSMIC_LINK", "").strip() or COSMIC_EXPRESSION_URL
+    authorization = os.environ.get("COSMIC_AUTHORIZATION", "").strip()
     if link == COSMIC_EXPRESSION_URL and not authorization:
-        raise RuntimeError("COSMIC_AUTHORIZATION is not set; add it to local .env")
+        raise RuntimeError(
+            "COSMIC_AUTHORIZATION is not set. Run the notebook credential setup "
+            "cell before building the expression cache. In Colab, add "
+            "COSMIC_AUTHORIZATION to Secrets and enable Notebook access, then "
+            "rerun that setup cell. Locally, load your project .env with "
+            "dotenv.load_dotenv(..., override=True) if it was added after import. "
+            "A valid COSMIC_LINK or an existing raw expression file can also be used."
+        )
     return Request(link, headers={"Authorization": f"Basic {authorization}"} if authorization else {})
 
 

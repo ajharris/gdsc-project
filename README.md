@@ -50,6 +50,12 @@ as the kernel, and run the cells in order. It downloads missing GDSC 8.4 files
 and builds or reuses the COSMIC v104 expression cache. For a fresh COSMIC download,
 set `COSMIC_AUTHORIZATION` or a signed `COSMIC_LINK` in your local `.env`; see
 [the configuration example](.env.example). Keep credentials out of version control.
+
+To run a notebook from top to bottom, put your `.env` in the project root or
+beside the notebook, then choose **Run all**. In Colab, upload your `.env` to
+`/content/.env` first, or select it when the setup cell opens a file picker.
+The setup loads credentials before analysis without displaying their values.
+Use your own valid COSMIC credentials; `.env.example` contains no authorization.
 The initial expression-cache build can take time; later runs reuse it.
 
 ## Create your own experiment
